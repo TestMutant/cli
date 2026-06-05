@@ -1,0 +1,66 @@
+name: Deployment
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: ci
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify package version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          LOCK_VERSION="$(node -p "require('./package-lock.json').packages[''].version")"
+
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Version mismatch: package.json has $PACKAGE_VERSION but git tag is $GITHUB_REF_NAME."
+            echo "Update package.json/package-lock.json before creating the release tag."
+            exit 1
+          fi
+
+          if [ "$LOCK_VERSION" != "$TAG_VERSION" ]; then
+            echo "Version mismatch: package-lock.json has $LOCK_VERSION but git tag is $GITHUB_REF_NAME."
+            echo "Run npm version $TAG_VERSION --no-git-tag-version before creating the release tag."
+            exit 1
+          fi
+
+      - name: Build package
+        run: npm run build
+
+      - name: Show trusted publishing identity
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+
+      - name: Publish package
+        run: npm publish --access public
