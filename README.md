@@ -30,6 +30,10 @@ The CLI reads configuration from environment variables or command-line flags.
 | --- | --- | --- |
 | `TESTMUTANT_API_KEY` | `--api-key <key>` | TestMutant API key used to authenticate requests. |
 | `TESTMUTANT_API_URL` | `--api-url <url>` | TestMutant API base URL. Defaults to `http://localhost:5086`. |
+| `TESTMUTANT_REPOSITORY_PROVIDER` | | Optional repository provider override for `testmutant ci`. |
+| `TESTMUTANT_REPOSITORY_FULL_NAME` | | Optional repository full name override for `testmutant ci`. |
+| `TESTMUTANT_BASE_URL` | | Optional environment URL recorded by `testmutant ci`. |
+| `TESTMUTANT_ENVIRONMENT` | | Optional environment name recorded by `testmutant ci`. |
 | | `--timeout <ms>` | API request timeout in milliseconds. Defaults to `30000`. |
 | | `--json` | Print command output as JSON. |
 
@@ -73,8 +77,8 @@ Store `TESTMUTANT_API_KEY` as a secret in your CI provider.
 Example GitHub Actions step:
 
 ```yaml
-- name: Verify TestMutant connection
-  run: npx @testmutant/cli --json ping
+- name: Record TestMutant CI run
+  run: npx @testmutant/cli --json ci
   env:
     TESTMUTANT_API_KEY: ${{ secrets.TESTMUTANT_API_KEY }}
 ```
@@ -85,6 +89,11 @@ Example GitHub Actions step:
 
 Verifies that the CLI can authenticate with the TestMutant API and prints the
 connected organization and CLI API version.
+
+### `testmutant ci`
+
+Detects repository, branch, commit, and CI provider metadata, creates a
+TestMutant run, immediately completes it, and prints the run id and status.
 
 ## License
 

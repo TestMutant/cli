@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Command } from "commander";
 import { TestMutantApiClient } from "./api-client";
+import { buildCreateRunRequest } from "./ci-metadata";
 import {
   API_KEY_ENV_VAR,
   API_URL_ENV_VAR,
@@ -70,6 +71,42 @@ program
     console.log("Connected to TestMutant.");
     console.log(`Organization: ${ping.organizationName} (${ping.organizationId})`);
     console.log(`CLI API version: ${ping.cliApiVersion}`);
+  });
+
+program
+  .command("ci")
+  .description("Create and complete a TestMutant CI run.")
+  .action(async () => {
+    const options = program.opts<GlobalOptions>();
+    const config = resolveConfig(options);
+    const client = new TestMutantApiClient({
+      ...config,
+      userAgent: `testmutant-cli/${packageInfo.version}`,
+    });
+
+    const createRunRequest = buildCreateRunRequest();
+    const created = await client.createRun(createRunRequest);
+    const completed = await client.completeRun(created.runId, {
+      status: "Passed",
+      summary: "CI metadata captured.",
+      results: null,
+      resultJson: null,
+      errorMessage: null,
+    });
+
+    if (options.json) {
+      console.log(
+        JSON.stringify(
+          { runId: completed.runId, status: completed.status },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.log(`Run ID: ${completed.runId}`);
+    console.log(`Status: ${completed.status}`);
   });
 
 program.showHelpAfterError();

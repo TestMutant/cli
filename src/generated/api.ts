@@ -11,7 +11,55 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["CliV1_Ping"];
+        get?: never;
+        put?: never;
+        post: operations["CliV1_Ping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_CreateRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/runs/{runId}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_CompleteRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["CliV1_GetRun"];
         put?: never;
         post?: never;
         delete?: never;
@@ -24,12 +72,117 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        CliCompleteRunRequest: {
+            status: null | string;
+            summary: null | string;
+            results: null | components["schemas"]["JsonElement"];
+            resultJson: null | string;
+            errorMessage: null | string;
+        };
+        CliCompleteRunResponse: {
+            ok: boolean;
+            /** Format: uuid */
+            runId: string;
+            status: string;
+        };
+        CliCreateRunRequest: {
+            mode: null | string;
+            runKind: null | string;
+            repositoryProvider: null | string;
+            repositoryFullName: null | string;
+            baseUrl: null | string;
+            environmentName: null | string;
+            branch: null | string;
+            commitSha: null | string;
+            /** Format: int32 */
+            pullRequestNumber: null | number | string;
+            ciProvider: null | string;
+            ciRunId: null | string;
+        };
+        CliPingRequest: {
+            repositoryProvider: null | string;
+            repositoryFullName: null | string;
+        };
         CliPingResponse: {
             ok: boolean;
             /** Format: uuid */
             organizationId: string;
             organizationName: string;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            repositoryMatched: null | boolean;
+            /** Format: uuid */
+            repositoryId: null | string;
+            repositoryFullName: null | string;
             cliApiVersion: string;
+        };
+        CliRunCreatedResponse: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            organizationId: string;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            /** Format: uuid */
+            repositoryId: string;
+            repositoryFullName: string;
+            status: string;
+        };
+        CliRunDetailResponse: {
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            organizationId: string;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            /** Format: uuid */
+            repositoryId: null | string;
+            repositoryProvider: null | string;
+            repositoryFullName: null | string;
+            baseUrl: null | string;
+            environmentName: null | string;
+            source: string;
+            mode: string;
+            runKind: string;
+            status: string;
+            branch: null | string;
+            commitSha: null | string;
+            /** Format: int32 */
+            pullRequestNumber: null | number | string;
+            ciProvider: null | string;
+            ciRunId: null | string;
+            /** Format: date-time */
+            startedAtUtc: string;
+            /** Format: date-time */
+            completedAtUtc: null | string;
+            summary: null | string;
+            resultJson: null | string;
+            errorMessage: null | string;
+            /** Format: date-time */
+            createdAtUtc: string;
+        };
+        HttpValidationProblemDetails: {
+            type?: null | string;
+            title?: null | string;
+            /** Format: int32 */
+            status?: null | number | string;
+            detail?: null | string;
+            instance?: null | string;
+            errors?: {
+                [key: string]: string[];
+            };
+        };
+        JsonElement: unknown;
+        ProblemDetails: {
+            type?: null | string;
+            title?: null | string;
+            /** Format: int32 */
+            status?: null | number | string;
+            detail?: null | string;
+            instance?: null | string;
         };
     };
     responses: never;
@@ -47,7 +200,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliPingRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -64,6 +221,144 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    CliV1_CreateRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliCreateRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliRunCreatedResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["HttpValidationProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CliV1_CompleteRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliCompleteRunRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliCompleteRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["HttpValidationProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CliV1_GetRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliRunDetailResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
             };
         };
     };
