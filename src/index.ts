@@ -20,6 +20,11 @@ type GlobalOptions = {
   timeout?: string;
 };
 
+type PackageInfo = {
+  name: string;
+  version: string;
+};
+
 const packageInfo = readPackageInfo();
 const program = new Command();
 
@@ -34,6 +39,16 @@ program
   )
   .option("--timeout <ms>", "API request timeout in milliseconds.", "30000")
   .option("--json", "Print command output as JSON.");
+
+program.hook("preAction", async () => {
+  const options = program.opts<GlobalOptions>();
+
+  if (options.json) {
+    return;
+  }
+
+  await printUpdateReminder(packageInfo);
+});
 
 program
   .command("ping")
@@ -76,14 +91,113 @@ program.parseAsync(process.argv).catch((error: unknown) => {
   process.exitCode = 1;
 });
 
-function readPackageInfo(): { version: string } {
+function readPackageInfo(): PackageInfo {
   const packageJsonPath = join(__dirname, "..", "package.json");
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+    name?: unknown;
     version?: unknown;
   };
 
   return {
+    name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
     version:
       typeof packageJson.version === "string" ? packageJson.version : "0.0.0",
+  };
+}
+
+async function printUpdateReminder(packageInfo: PackageInfo): Promise<void> {
+  const latestVersion = await fetchLatestPackageVersion(packageInfo.name);
+
+  if (!latestVersion || !isNewerVersion(latestVersion, packageInfo.version)) {
+    return;
+  }
+
+  console.log(
+    `There is a newer TestMutant CLI version available (${packageInfo.version} -> ${latestVersion}). Run npm install -g ${packageInfo.name}@latest to update.`,
+  );
+  console.log("");
+}
+
+async function fetchLatestPackageVersion(
+  packageName: string,
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_000);
+
+  try {
+    const response = await fetch(
+      `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
+      {
+        headers: { accept: "application/json" },
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const body = (await response.json()) as { version?: unknown };
+    return typeof body.version === "string" ? body.version : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isNewerVersion(candidate: string, current: string): boolean {
+  const candidateVersion = parseSemver(candidate);
+  const currentVersion = parseSemver(current);
+
+  if (!candidateVersion || !currentVersion) {
+    return candidate !== current;
+  }
+
+  for (const key of ["major", "minor", "patch"] as const) {
+    if (candidateVersion[key] > currentVersion[key]) {
+      return true;
+    }
+
+    if (candidateVersion[key] < currentVersion[key]) {
+      return false;
+    }
+  }
+
+  if (!candidateVersion.prerelease && currentVersion.prerelease) {
+    return true;
+  }
+
+  if (candidateVersion.prerelease && !currentVersion.prerelease) {
+    return false;
+  }
+
+  return (
+    Boolean(candidateVersion.prerelease && currentVersion.prerelease) &&
+    candidateVersion.prerelease > currentVersion.prerelease
+  );
+}
+
+function parseSemver(value: string):
+  | {
+      major: number;
+      minor: number;
+      patch: number;
+      prerelease: string;
+    }
+  | null {
+  const match = value
+    .trim()
+    .match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.+)?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? "",
   };
 }
