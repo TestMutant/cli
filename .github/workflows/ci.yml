@@ -30,5 +30,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run typecheck
+        run: npm run typecheck
+
       - name: Run tests
         run: npm test
+
+      - name: Build package
+        run: npm run build
+
+      - name: Verify dist is committed
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "dist is out of date. Run npm run build and commit the generated dist files."
+            exit 1
+          fi

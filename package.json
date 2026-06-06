@@ -1,6 +1,6 @@
 {
   "name": "@testmutant/cli",
-  "version": "0.0.2",
+  "version": "1.0.0-alpha.0",
   "description": "TestMutant CLI.",
   "private": false,
   "main": "dist/index.js",
@@ -10,10 +10,17 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup",
-    "test": "npm run typecheck && node --import tsx --test \"tests/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:dist": "git diff --exit-code -- dist",
     "ci": "node dist/index.js ci",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "release:alpha": "npm version prerelease --preid alpha --no-git-tag-version && npm run check",
+    "release:stable": "npm version 1.0.0 --no-git-tag-version && npm run check",
+    "prepublishOnly": "npm run check"
+  },
+  "simple-git-hooks": {
+    "pre-push": "npm run typecheck && npm test && npm run build && git diff --exit-code -- dist"
   },
   "files": [
     "dist"
@@ -40,6 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "simple-git-hooks": "^2.13.1",
     "tsup": "^8.5.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
