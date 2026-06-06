@@ -8,14 +8,29 @@ type RepositoryMetadata = {
   fullName: string | null;
 };
 
-export function buildCreateRunRequest(): CliCreateRunRequest {
+export type BuildCreateRunRequestOptions = {
+  mode?: string;
+  runKind?: string;
+  repositoryProvider?: string;
+  repositoryFullName?: string;
+  baseUrl?: string;
+  environmentName?: string;
+};
+
+export function buildCreateRunRequest(
+  options: BuildCreateRunRequestOptions = {},
+): CliCreateRunRequest {
   const env = process.env;
   const gitRepository = getGitRepositoryMetadata();
+
   const repositoryProvider =
+    normalize(options.repositoryProvider) ??
     normalize(env.TESTMUTANT_REPOSITORY_PROVIDER) ??
     detectRepositoryProvider(env) ??
     gitRepository.provider;
+
   const repositoryFullName =
+    normalize(options.repositoryFullName) ??
     normalize(env.TESTMUTANT_REPOSITORY_FULL_NAME) ??
     detectRepositoryFullName(env) ??
     gitRepository.fullName;
@@ -28,12 +43,12 @@ export function buildCreateRunRequest(): CliCreateRunRequest {
   }
 
   return {
-    mode: "Advisory",
-    runKind: "Advisory",
+    mode: normalize(options.mode) ?? "Advisory",
+    runKind: normalize(options.runKind) ?? "Advisory",
     repositoryProvider: repositoryProvider ?? "GitHub",
     repositoryFullName,
-    baseUrl: detectBaseUrl(env),
-    environmentName: detectEnvironmentName(env),
+    baseUrl: normalizeUrl(options.baseUrl) ?? detectBaseUrl(env),
+    environmentName: normalize(options.environmentName) ?? detectEnvironmentName(env),
     branch: detectBranch(env) ?? git(["rev-parse", "--abbrev-ref", "HEAD"]),
     commitSha: detectCommitSha(env) ?? git(["rev-parse", "HEAD"]),
     pullRequestNumber: detectPullRequestNumber(env),

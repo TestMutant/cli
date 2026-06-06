@@ -1,0 +1,34 @@
+name: TestMutant
+description: Run TestMutant ticket-linked QA in CI.
+
+inputs:
+  mode:
+    description: Run mode. Advisory, Generate, Run, Enforce.
+    required: false
+    default: Advisory
+
+  api_url:
+    description: TestMutant API URL.
+    required: false
+    default: https://api.testmutant.com
+
+  repository:
+    description: Repository full name override, e.g. owner/repo.
+    required: false
+
+  provider:
+    description: Repository provider.
+    required: false
+    default: GitHub
+
+  base_url:
+    description: Application base URL.
+    required: false
+
+  environment_name:
+    description: Environment name, e.g. staging, preview, production.
+    required: false
+
+runs:
+  using: node20
+  main: dist/action.js
