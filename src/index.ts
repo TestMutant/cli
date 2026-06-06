@@ -3,6 +3,7 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runCi } from "./run-ci";
 import { Command } from "commander";
 import { TestMutantApiClient } from "./api-client";
 import { buildCreateRunRequest } from "./ci-metadata";
@@ -76,38 +77,42 @@ program
 program
   .command("ci")
   .description("Create and complete a TestMutant CI run.")
-  .action(async () => {
-    const options = program.opts<GlobalOptions>();
-    const config = resolveConfig(options);
-    const client = new TestMutantApiClient({
-      ...config,
-      userAgent: `testmutant-cli/${packageInfo.version}`,
-    });
+  .option("--mode <mode>", "Run mode.", "Advisory")
+  .option("--repository <repository>", "Repository full name override, e.g. owner/repo.")
+  .option("--provider <provider>", "Repository provider.", "GitHub")
+  .option("--base-url <url>", "Application base URL.")
+  .option("--environment <name>", "Environment name.")
+  .action(
+    async (commandOptions: {
+      mode?: string;
+      repository?: string;
+      provider?: string;
+      baseUrl?: string;
+      environment?: string;
+    }) => {
+      const options = program.opts<GlobalOptions>();
 
-    const createRunRequest = buildCreateRunRequest();
-    const created = await client.createRun(createRunRequest);
-    const completed = await client.completeRun(created.runId, {
-      status: "Passed",
-      summary: "CI metadata captured.",
-      results: null,
-      resultJson: null,
-      errorMessage: null,
-    });
+      const result = await runCi({
+        apiKey: options.apiKey,
+        apiUrl: options.apiUrl,
+        timeout: options.timeout,
+        mode: commandOptions.mode,
+        repository: commandOptions.repository,
+        provider: commandOptions.provider,
+        baseUrl: commandOptions.baseUrl,
+        environmentName: commandOptions.environment,
+        userAgent: `testmutant-cli/${packageInfo.version}`,
+      });
 
-    if (options.json) {
-      console.log(
-        JSON.stringify(
-          { runId: completed.runId, status: completed.status },
-          null,
-          2,
-        ),
-      );
-      return;
-    }
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
 
-    console.log(`Run ID: ${completed.runId}`);
-    console.log(`Status: ${completed.status}`);
-  });
+      console.log(`Run ID: ${result.runId}`);
+      console.log(`Status: ${result.status}`);
+    },
+  );
 
 program.showHelpAfterError();
 
