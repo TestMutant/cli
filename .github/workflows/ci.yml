@@ -24,7 +24,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 20
           cache: npm
 
       - name: Install dependencies
@@ -42,6 +42,13 @@ jobs:
       - name: Verify dist is committed
         run: |
           if ! git diff --exit-code -- dist; then
-            echo "dist is out of date. Run npm run build and commit the generated dist files."
+            echo "dist is out of date. Changed files:"
+            git status --short dist
+            echo ""
+            echo "Diff stat:"
+            git diff --stat -- dist
+            echo ""
+            echo "First 160 lines of diff:"
+            git diff -- dist | head -n 160
             exit 1
           fi
