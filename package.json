@@ -1,6 +1,6 @@
 {
   "name": "@testmutant/cli",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.2",
   "description": "TestMutant CLI.",
   "private": false,
   "main": "dist/index.js",
