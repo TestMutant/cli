@@ -2,7 +2,6 @@
 "use strict";
 
 // src/action.ts
-var import_config4 = require("dotenv/config");
 var import_node_fs2 = require("fs");
 var import_node_path = require("path");
 
