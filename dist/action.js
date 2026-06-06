@@ -481,4 +481,3 @@ function readPackageInfo() {
     version: typeof packageJson.version === "string" ? packageJson.version : "0.0.0"
   };
 }
-//# sourceMappingURL=action.js.map
