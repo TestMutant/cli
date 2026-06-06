@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+      - package-lock.json
+      - dist/**
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    name: Tag and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Verify dist is committed
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "dist is out of date. Run npm run build and commit the generated dist files."
+            exit 1
+          fi
+
+      - name: Read package version
+        id: version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: tag
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      - name: Publish package
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+
+          if [[ "$PACKAGE_VERSION" == *-* ]]; then
+            PRERELEASE_TAG="${PACKAGE_VERSION#*-}"
+            DIST_TAG="${PRERELEASE_TAG%%.*}"
+
+            echo "Publishing prerelease $PACKAGE_VERSION with npm dist-tag '$DIST_TAG'"
+            npm publish --access public --provenance --tag "$DIST_TAG"
+          else
+            echo "Publishing stable $PACKAGE_VERSION with npm dist-tag 'latest'"
+            npm publish --access public --provenance
+          fi
