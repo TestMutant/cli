@@ -1,6 +1,6 @@
 {
   "name": "@testmutant/cli",
-  "version": "1.0.0-alpha.0",
+  "version": "1.0.0-alpha.1",
   "description": "TestMutant CLI.",
   "private": false,
   "main": "dist/index.js",
@@ -11,7 +11,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "test": "node --import tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "check:dist": "git diff --exit-code -- dist",
     "ci": "node dist/index.js ci",

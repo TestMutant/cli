@@ -10,7 +10,7 @@ on:
       - dist/**
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
 jobs:
@@ -19,15 +19,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_ID }}
+          private-key: ${{ secrets.BOT_SECRET_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 20
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
@@ -40,7 +48,14 @@ jobs:
       - name: Verify dist is committed
         run: |
           if ! git diff --exit-code -- dist; then
-            echo "dist is out of date. Run npm run build and commit the generated dist files."
+            echo "dist is out of date. Changed files:"
+            git status --short dist
+            echo ""
+            echo "Diff stat:"
+            git diff --stat -- dist
+            echo ""
+            echo "First 160 lines of diff:"
+            git diff -- dist | head -n 160
             exit 1
           fi
 
@@ -64,13 +79,16 @@ jobs:
 
       - name: Create and push tag
         if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git config user.name "testmutant-bot[bot]"
+          git config user.email "testmutant-bot[bot]@users.noreply.github.com"
 
           git tag "$TAG" "$GITHUB_SHA"
-          git push origin "$TAG"
+          git push "https://x-access-token:${GH_APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
 
       - name: Publish package
         if: steps.tag.outputs.exists == 'false'
