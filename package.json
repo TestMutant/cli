@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup",
+    "test": "npm run typecheck && node --import tsx --test \"tests/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "ci": "node dist/index.js ci",
     "prepublishOnly": "npm run typecheck && npm run build"
