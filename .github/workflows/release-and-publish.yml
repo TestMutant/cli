@@ -91,6 +91,14 @@ jobs:
 
           git push "https://x-access-token:${GH_APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
 
+      - name: Show trusted publishing identity
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_WORKFLOW=$GITHUB_WORKFLOW"
+          echo "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+
       - name: Publish package
         if: steps.tag.outputs.exists == 'false'
         shell: bash
@@ -102,8 +110,8 @@ jobs:
             DIST_TAG="${PRERELEASE_TAG%%.*}"
 
             echo "Publishing prerelease $PACKAGE_VERSION with npm dist-tag '$DIST_TAG'"
-            npm publish --access public --provenance --tag "$DIST_TAG"
+            npm publish --access public --tag "$DIST_TAG"
           else
             echo "Publishing stable $PACKAGE_VERSION with npm dist-tag 'latest'"
-            npm publish --access public --provenance
+            npm publish --access public
           fi
