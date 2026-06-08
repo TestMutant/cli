@@ -1,9 +1,11 @@
-name: Release
+name: Release and Publish
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
     paths:
       - package.json
       - package-lock.json

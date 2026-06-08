@@ -1,4 +1,4 @@
-export const DEFAULT_API_URL = "http://localhost:5086";
+export const DEFAULT_API_URL = "https://api.testmutant.com";
 export const API_KEY_ENV_VAR = "TESTMUTANT_API_KEY";
 export const API_URL_ENV_VAR = "TESTMUTANT_API_URL";
 

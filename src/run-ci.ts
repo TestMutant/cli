@@ -1,4 +1,4 @@
-import { TestMutantApiClient } from "./api-client";
+import { TestMutantApiClient, type CliRunTest } from "./api-client";
 import { buildCreateRunRequest } from "./ci-metadata";
 import {
   API_KEY_ENV_VAR,
@@ -7,6 +7,12 @@ import {
   DEFAULT_API_URL,
   resolveConfig,
 } from "./config";
+import {
+  runPlaywrightTests,
+  type PlaywrightExecutionOptions,
+  type TestRunSummary,
+  type TestRunResult
+} from "./playwright-runner";
 
 export type RunCiOptions = {
   apiKey?: string;
@@ -20,12 +26,23 @@ export type RunCiOptions = {
   environmentName?: string;
 
   userAgent: string;
+  testExecutor?: RunCiTestExecutor;
 };
 
 export type RunCiResult = {
   runId: string;
   status: string;
+  totalTests: number;
+  passedTests: number;
+  failedTests: number;
+  tests?: TestRunResult[];
+  baseUrl?: string | null;
 };
+
+export type RunCiTestExecutor = (
+  tests: Parameters<typeof runPlaywrightTests>[0],
+  options: PlaywrightExecutionOptions,
+) => Promise<TestRunSummary>;
 
 export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
   applyOptionEnvironmentOverrides(options);
@@ -50,13 +67,23 @@ export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
   });
 
   const created = await client.createRun(createRunRequest);
+  const testExecutor = options.testExecutor ?? runPlaywrightTests;
+  const runTests = created.tests ?? [];
+  const testSummary = await executeTestsForApiCompletion(
+    testExecutor,
+    runTests,
+    createRunRequest.baseUrl,
+  );
+  const passed = testSummary.failed === 0;
 
   const completed = await client.completeRun(created.runId, {
-    status: "Passed",
-    summary: "CI metadata captured.",
+    status: passed ? "Passed" : "Failed",
+    summary:
+      testSummary.total === 0
+        ? "CI metadata captured. No tests were returned for this run."
+        : `Executed ${testSummary.total} Playwright test${testSummary.total === 1 ? "" : "s"}: ${testSummary.passed} passed, ${testSummary.failed} failed.`,
     results: {
-      kind: "advisory",
-      message: "TestMutant CLI vertical slice completed successfully.",
+      ...testSummary,
       repositoryFullName: createRunRequest.repositoryFullName,
       branch: createRunRequest.branch,
       commitSha: createRunRequest.commitSha,
@@ -65,12 +92,24 @@ export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
       generatedAtUtc: new Date().toISOString(),
     },
     resultJson: null,
-    errorMessage: null,
+    errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`,
   });
+
+  if (!passed && isEnforceMode(createRunRequest.mode)) {
+    throw new CliError(
+      `TestMutant run failed: ${testSummary.failed} of ${testSummary.total} Playwright tests failed.`,
+      1,
+    );
+  }
 
   return {
     runId: completed.runId,
     status: completed.status,
+    totalTests: testSummary.total,
+    passedTests: testSummary.passed,
+    failedTests: testSummary.failed,
+    tests: testSummary.tests,
+    baseUrl: testSummary.baseUrl,
   };
 }
 
@@ -85,5 +124,37 @@ function applyOptionEnvironmentOverrides(options: RunCiOptions): void {
 
   if (!process.env[API_URL_ENV_VAR]) {
     process.env[API_URL_ENV_VAR] = DEFAULT_API_URL;
+  }
+}
+
+function isEnforceMode(mode: string | null | undefined): boolean {
+  return mode?.trim().toLowerCase() === "enforce";
+}
+
+async function executeTestsForApiCompletion(
+  testExecutor: RunCiTestExecutor,
+  tests: CliRunTest[],
+  baseUrl: string | null,
+): Promise<TestRunSummary> {
+  try {
+    return await testExecutor(tests, { baseUrl });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    return {
+      kind: "playwright",
+      baseUrl,
+      total: tests.length,
+      passed: 0,
+      failed: tests.length,
+      tests: tests.map((test) => ({
+        testId: test.testId,
+        type: test.type,
+        name: test.name,
+        status: "Failed",
+        errorMessage: message,
+        durationMs: null,
+      })),
+    };
   }
 }

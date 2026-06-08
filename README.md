@@ -73,14 +73,29 @@ testmutant --json ping
 
 ## CI Usage
 
-Store `TESTMUTANT_API_KEY` as a secret in your CI provider. 
+Store `TESTMUTANT_API_KEY` as a secret in your CI provider. Pass the deployed
+or preview application URL as the positional `ci` argument, or use
+`--base-url`.
 Example GitHub Actions step:
 
 ```yaml
-- name: Record TestMutant CI run
-  run: npx @testmutant/cli --json ci
-  env:
-    TESTMUTANT_API_KEY: ${{ secrets.TESTMUTANT_API_KEY }}
+permissions:
+  contents: read
+
+jobs:
+  testmutant:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run TestMutant
+        uses: TestMutant/cli@alpha
+        with:
+          mode: Advisory
+          base_url: https://preview.example.com
+        env:
+          TESTMUTANT_API_KEY: ${{ secrets.TESTMUTANT_API_KEY }}
 ```
 
 ## Commands
@@ -93,7 +108,19 @@ connected organization and CLI API version.
 ### `testmutant ci`
 
 Detects repository, branch, commit, and CI provider metadata, creates a
-TestMutant run, immediately completes it, and prints the run id and status.
+TestMutant run, executes any Playwright tests returned by the API against the
+provided base URL, completes the run with pass/fail results, and prints the run
+id, status, and test counts.
+
+```sh
+testmutant ci https://preview.example.com
+testmutant ci --base-url https://preview.example.com
+testmutant ci --mode Enforce https://preview.example.com
+```
+
+Generated Playwright tests run with the CLI-managed Playwright runtime. In
+`Enforce` mode, failed generated tests are reported to the API before the CLI
+exits with a nonzero status.
 
 ## License
 

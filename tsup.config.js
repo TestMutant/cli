@@ -9,12 +9,10 @@ export default defineConfig({
   target: "node20",
   platform: "node",
   bundle: true,
+  external: ["@playwright/test", "playwright"],
   splitting: false,
   sourcemap: false,
   clean: true,
   dts: false,
   outDir: "dist",
-  banner: {
-    js: "#!/usr/bin/env node",
-  },
 });

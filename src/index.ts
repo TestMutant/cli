@@ -77,19 +77,23 @@ program
 program
   .command("ci")
   .description("Create and complete a TestMutant CI run.")
+  .argument("[url]", "Application base URL.")
   .option("--mode <mode>", "Run mode.", "Advisory")
   .option("--repository <repository>", "Repository full name override, e.g. owner/repo.")
   .option("--provider <provider>", "Repository provider.", "GitHub")
   .option("--base-url <url>", "Application base URL.")
   .option("--environment <name>", "Environment name.")
   .action(
-    async (commandOptions: {
+    async (
+      url: string | undefined,
+      commandOptions: {
       mode?: string;
       repository?: string;
       provider?: string;
       baseUrl?: string;
       environment?: string;
-    }) => {
+      },
+    ) => {
       const options = program.opts<GlobalOptions>();
 
       const result = await runCi({
@@ -99,7 +103,7 @@ program
         mode: commandOptions.mode,
         repository: commandOptions.repository,
         provider: commandOptions.provider,
-        baseUrl: commandOptions.baseUrl,
+        baseUrl: url ?? commandOptions.baseUrl,
         environmentName: commandOptions.environment,
         userAgent: `testmutant-cli/${packageInfo.version}`,
       });
@@ -111,6 +115,9 @@ program
 
       console.log(`Run ID: ${result.runId}`);
       console.log(`Status: ${result.status}`);
+      console.log(
+        `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`,
+      );
     },
   );
 
