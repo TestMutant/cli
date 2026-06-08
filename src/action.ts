@@ -41,6 +41,9 @@ async function main(): Promise<void> {
   console.log("TestMutant run completed.");
   console.log(`Run ID: ${result.runId}`);
   console.log(`Status: ${result.status}`);
+  console.log(
+    `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`,
+  );
 }
 
 function getInput(name: string): string | undefined {

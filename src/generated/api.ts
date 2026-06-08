@@ -129,6 +129,14 @@ export interface components {
             repositoryId: string;
             repositoryFullName: string;
             status: string;
+            tests: components["schemas"]["CliRunTest"][];
+        };
+        CliRunTest: {
+            /** Format: uuid */
+            testId: string;
+            type: string;
+            name: string;
+            source: string;
         };
         CliRunDetailResponse: {
             /** Format: uuid */
