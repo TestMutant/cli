@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { CliError } from "./config";
+import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import { createRequire } from "node:module";
 import type { CliRunTest } from "./api-client";
 
@@ -121,7 +121,7 @@ export async function runPlaywrightTests(
 
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
 
-    await ensurePlaywrightBrowserInstalled(commandRunner, workDir);
+    await ensurePlaywrightBrowserInstalled();
 
     const result = await commandRunner(
       process.execPath,
@@ -342,33 +342,6 @@ function getPlaywrightTestArgs(
   ];
 }
 
-async function ensurePlaywrightBrowserInstalled(
-  commandRunner: PlaywrightCommandRunner,
-  workDir: string,
-): Promise<void> {
-  const result = await commandRunner(
-    process.execPath,
-    getPlaywrightInstallArgs(),
-    {
-      cwd: workDir,
-      env: {
-        ...process.env,
-        NODE_PATH: buildNodePath(process.env.NODE_PATH),
-      },
-    },
-  );
-
-  if (result.exitCode !== 0) {
-    throw new CliError(
-      firstNonEmpty(
-        meaningfulStderr(result.stderr),
-        result.stdout,
-        "Failed to install Playwright Chromium browser.",
-      ) ?? "Failed to install Playwright Chromium browser.",
-      1,
-    );
-  }
-}
 
 function meaningfulStderr(stderr: string): string | null {
   const lines = stderr

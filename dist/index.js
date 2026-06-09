@@ -87,6 +87,47 @@ var init_config = __esm({
   }
 });
 
+// src/playwright-install.ts
+async function ensurePlaywrightBrowserInstalled() {
+  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
+  const playwrightCliPath = (0, import_node_path.join)(
+    (0, import_node_path.dirname)(runtimeRequire.resolve("playwright/package.json")),
+    "cli.js"
+  );
+  const args = process.platform === "linux" ? [playwrightCliPath, "install", "--with-deps", "chromium"] : [playwrightCliPath, "install", "chromium"];
+  const result = await execNode(args);
+  if (result.exitCode !== 0) {
+    throw new CliError(
+      result.stderr.trim() || result.stdout.trim() || "Failed to install Playwright Chromium browser."
+    );
+  }
+}
+function execNode(args) {
+  return new Promise((resolve) => {
+    (0, import_node_child_process2.execFile)(
+      process.execPath,
+      args,
+      {
+        maxBuffer: 10 * 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+        resolve({ exitCode, stdout, stderr });
+      }
+    );
+  });
+}
+var import_node_child_process2, import_node_module, import_node_path;
+var init_playwright_install = __esm({
+  "src/playwright-install.ts"() {
+    "use strict";
+    import_node_child_process2 = require("child_process");
+    import_node_module = require("module");
+    import_node_path = require("path");
+    init_config();
+  }
+});
+
 // src/agent-runner.ts
 var agent_runner_exports = {};
 __export(agent_runner_exports, {
@@ -232,6 +273,7 @@ async function handleToolCall(socket, browserDriver, message) {
   }
 }
 async function createDirectPlaywrightDriver() {
+  await ensurePlaywrightBrowserInstalled();
   const browser = await import_playwright.chromium.launch({ headless: true });
   const page = await browser.newPage();
   return {
@@ -361,6 +403,7 @@ var init_agent_runner = __esm({
     "use strict";
     import_playwright = require("playwright");
     init_config();
+    init_playwright_install();
     import_ws = __toESM(require("ws"));
     SUPPORTED_TOOLS = /* @__PURE__ */ new Set([
       "browser_navigate",
@@ -375,7 +418,7 @@ var init_agent_runner = __esm({
 // src/index.ts
 var import_config6 = require("dotenv/config");
 var import_node_fs2 = require("fs");
-var import_node_path2 = require("path");
+var import_node_path3 = require("path");
 
 // src/api-client.ts
 init_config();
@@ -706,12 +749,12 @@ function git(args) {
 init_config();
 
 // src/playwright-runner.ts
-var import_node_child_process2 = require("child_process");
+var import_node_child_process3 = require("child_process");
 var import_promises = require("fs/promises");
 var import_node_os = require("os");
-var import_node_path = require("path");
-init_config();
-var import_node_module = require("module");
+var import_node_path2 = require("path");
+init_playwright_install();
+var import_node_module2 = require("module");
 var PLAYWRIGHT_TYPE = "playwright";
 async function runPlaywrightTests(tests, options = {}) {
   const supported = tests.filter(isPlaywrightTest);
@@ -727,7 +770,7 @@ async function runPlaywrightTests(tests, options = {}) {
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
   }
-  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
+  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
   try {
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
@@ -735,7 +778,7 @@ async function runPlaywrightTests(tests, options = {}) {
       options.baseUrl ?? null
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    await ensurePlaywrightBrowserInstalled(commandRunner, workDir);
+    await ensurePlaywrightBrowserInstalled();
     const result = await commandRunner(
       process.execPath,
       getPlaywrightTestArgs(workDir, writtenTests),
@@ -761,7 +804,7 @@ function isPlaywrightTest(test) {
 }
 async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   await (0, import_promises.writeFile)(
-    (0, import_node_path.join)(workDir, "playwright.config.cjs"),
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
       "  timeout: 30000,",
@@ -780,7 +823,7 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
     const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
       test.testId
     )}.spec.ts`;
-    const filePath = (0, import_node_path.join)(workDir, fileName);
+    const filePath = (0, import_node_path2.join)(workDir, fileName);
     await (0, import_promises.writeFile)(filePath, test.source, "utf8");
     writtenTests.push({ test, filePath, fileName });
   }
@@ -873,54 +916,25 @@ function summarize(baseUrl, tests) {
   };
 }
 function getPlaywrightCliPath() {
-  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
-  return (0, import_node_path.join)((0, import_node_path.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  return (0, import_node_path2.join)((0, import_node_path2.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
 }
 function buildNodePath(existing) {
-  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
-  const dependencyPath = (0, import_node_path.dirname)(
-    (0, import_node_path.dirname)((0, import_node_path.dirname)(runtimeRequire.resolve("@playwright/test")))
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  const dependencyPath = (0, import_node_path2.dirname)(
+    (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
-}
-function getPlaywrightInstallArgs() {
-  if (process.platform === "linux") {
-    return [getPlaywrightCliPath(), "install", "--with-deps", "chromium"];
-  }
-  return [getPlaywrightCliPath(), "install", "chromium"];
 }
 function getPlaywrightTestArgs(workDir, writtenTests) {
   return [
     getPlaywrightCliPath(),
     "test",
     "--config",
-    (0, import_node_path.join)(workDir, "playwright.config.cjs"),
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     "--reporter=json",
     ...writtenTests.map((writtenTest) => writtenTest.fileName)
   ];
-}
-async function ensurePlaywrightBrowserInstalled(commandRunner, workDir) {
-  const result = await commandRunner(
-    process.execPath,
-    getPlaywrightInstallArgs(),
-    {
-      cwd: workDir,
-      env: {
-        ...process.env,
-        NODE_PATH: buildNodePath(process.env.NODE_PATH)
-      }
-    }
-  );
-  if (result.exitCode !== 0) {
-    throw new CliError(
-      firstNonEmpty(
-        meaningfulStderr(result.stderr),
-        result.stdout,
-        "Failed to install Playwright Chromium browser."
-      ) ?? "Failed to install Playwright Chromium browser.",
-      1
-    );
-  }
 }
 function meaningfulStderr(stderr) {
   const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => {
@@ -969,7 +983,7 @@ function delimiter() {
 }
 function defaultCommandRunner(command, args, options) {
   return new Promise((resolve) => {
-    (0, import_node_child_process2.execFile)(
+    (0, import_node_child_process3.execFile)(
       command,
       args,
       {
@@ -1255,7 +1269,7 @@ program.parseAsync(process.argv).catch((error) => {
   process.exitCode = 1;
 });
 function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path2.join)(__dirname, "..", "package.json");
+  const packageJsonPath = (0, import_node_path3.join)(__dirname, "..", "package.json");
   const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
   return {
     name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
