@@ -1,7 +1,4 @@
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { chromium, type Browser, type Page } from "playwright";
 import { CliError } from "./config";
 import WebSocket from "ws";
 
@@ -82,7 +79,7 @@ export function buildAgentWebSocketUrl(apiUrl: string, runId: string): string {
 export async function runAgentGeneration(
   options: AgentRunnerOptions,
 ): Promise<void> {
-  const browserDriver = options.browserDriver ?? (await createPlaywrightMcpDriver());
+  const browserDriver = options.browserDriver ?? (await createDirectPlaywrightDriver());
 
   try {
     await runAgentWebSocketLoop(options, browserDriver);
@@ -235,30 +232,71 @@ async function handleToolCall(
   }
 }
 
-async function createPlaywrightMcpDriver(): Promise<BrowserDriver> {
-  const runtimeRequire = createRequire(__filename);
-  const packageJsonPath = runtimeRequire.resolve("@playwright/mcp/package.json");
-  const cliPath = join(dirname(packageJsonPath), "cli.js");
-  const client = new Client({
-    name: "testmutant-cli",
-    version: "1.0.0",
-  });
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [cliPath, "--headless"],
-    stderr: "pipe",
-  });
-
-  await client.connect(transport);
+async function createDirectPlaywrightDriver(): Promise<BrowserDriver> {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
 
   return {
     async callTool(name, args) {
-      return await client.callTool({ name, arguments: args });
+      switch (name) {
+        case "browser_navigate": {
+          const url = getRequiredString(args, "url");
+          await page.goto(url, { waitUntil: "domcontentloaded" });
+          return await snapshotPage(page);
+        }
+
+        case "browser_snapshot":
+          return await snapshotPage(page);
+
+        case "browser_click": {
+          const selector = getRequiredString(args, "selector");
+          await page.click(selector);
+          return await snapshotPage(page);
+        }
+
+        case "browser_type": {
+          const selector = getRequiredString(args, "selector");
+          const text = typeof args.text === "string" ? args.text : "";
+          await page.fill(selector, text);
+          return await snapshotPage(page);
+        }
+
+        case "browser_evaluate": {
+          const script = getRequiredString(args, "script");
+          const result = await page.evaluate(script);
+          return {
+            url: page.url(),
+            title: await page.title(),
+            result,
+          };
+        }
+
+        default:
+          throw new Error(`Unsupported browser tool: ${name}`);
+      }
     },
+
     async close() {
-      await client.close();
+      await browser.close();
     },
   };
+}
+async function snapshotPage(page: Page): Promise<unknown> {
+  return {
+    url: page.url(),
+    title: await page.title(),
+    text: await page.locator("body").innerText().catch(() => ""),
+  };
+}
+
+function getRequiredString(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Browser tool argument '${key}' is required.`);
+  }
+
+  return value;
 }
 
 function createDefaultWebSocket(
