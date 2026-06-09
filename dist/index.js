@@ -1,10 +1,32 @@
 #!/usr/bin/env node
 "use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 
 // src/index.ts
-var import_config5 = require("dotenv/config");
+var import_config6 = require("dotenv/config");
 var import_node_fs2 = require("fs");
-var import_node_path2 = require("path");
+var import_node_path3 = require("path");
 
 // src/config.ts
 var DEFAULT_API_URL = "https://api.testmutant.com";
@@ -171,6 +193,249 @@ function truncate(value, maxLength) {
     return value;
   }
   return `${value.slice(0, maxLength)}...`;
+}
+
+// src/agent-runner.ts
+var import_node_module = require("module");
+var import_node_path = require("path");
+var import_client = require("@modelcontextprotocol/sdk/client/index.js");
+var import_stdio = require("@modelcontextprotocol/sdk/client/stdio.js");
+var import_ws = __toESM(require("ws"));
+var SUPPORTED_TOOLS = /* @__PURE__ */ new Set([
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_evaluate"
+]);
+function buildAgentWebSocketUrl(apiUrl, runId) {
+  const url = new URL(
+    `/api/cli/v1/runs/${encodeURIComponent(runId)}/agent/ws`,
+    apiUrl
+  );
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  } else {
+    throw new CliError(`Unsupported TestMutant API URL protocol: ${url.protocol}`);
+  }
+  return url.toString();
+}
+async function runAgentGeneration(options) {
+  const browserDriver = options.browserDriver ?? await createPlaywrightMcpDriver();
+  try {
+    await runAgentWebSocketLoop(options, browserDriver);
+  } finally {
+    await browserDriver.close();
+  }
+}
+async function runAgentWebSocketLoop(options, browserDriver) {
+  const webSocketFactory = options.webSocketFactory ?? createDefaultWebSocket;
+  const socket = webSocketFactory(buildAgentWebSocketUrl(options.apiUrl, options.runId), {
+    handshakeTimeout: options.timeoutMs,
+    headers: {
+      authorization: `Bearer ${options.apiKey}`,
+      "user-agent": options.userAgent
+    }
+  });
+  let settled = false;
+  let activeToolCalls = 0;
+  let closeAfterToolCalls = false;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      fail(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
+    }, options.timeoutMs);
+    const finish = () => {
+      if (settled || activeToolCalls > 0) {
+        closeAfterToolCalls = true;
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      resolve();
+    };
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      reject(error);
+    };
+    socket.on("open", () => {
+      sendJson(socket, { type: "runner_ready" });
+    });
+    socket.on("message", (data) => {
+      void handleMessage(data).catch(fail);
+    });
+    socket.on("error", (error) => {
+      fail(new CliError(`TestMutant agent websocket failed. ${error.message}`));
+    });
+    socket.on("close", (_code, reason) => {
+      if (!settled && activeToolCalls === 0) {
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+        return;
+      }
+      closeAfterToolCalls = true;
+      void reason;
+    });
+    async function handleMessage(data) {
+      const message = parseAgentMessage(data);
+      if (message.type === "agent_complete") {
+        finish();
+        return;
+      }
+      if (message.type === "error") {
+        fail(new CliError(formatApiError(message.message)));
+        return;
+      }
+      activeToolCalls += 1;
+      try {
+        await handleToolCall(socket, browserDriver, message);
+      } finally {
+        activeToolCalls -= 1;
+        if (closeAfterToolCalls && activeToolCalls === 0) {
+          finish();
+        }
+      }
+    }
+  });
+}
+async function handleToolCall(socket, browserDriver, message) {
+  if (!SUPPORTED_TOOLS.has(message.name)) {
+    sendJson(socket, {
+      type: "tool_result",
+      id: message.id,
+      ok: false,
+      error: `Unsupported browser tool: ${message.name}`,
+      observation: {}
+    });
+    return;
+  }
+  const args = normalizeArguments(message.arguments);
+  try {
+    const observation = await browserDriver.callTool(message.name, args);
+    if (isToolErrorObservation(observation)) {
+      sendJson(socket, {
+        type: "tool_result",
+        id: message.id,
+        ok: false,
+        error: extractObservationError(observation),
+        observation: normalizeObservation(observation)
+      });
+      return;
+    }
+    sendJson(socket, {
+      type: "tool_result",
+      id: message.id,
+      ok: true,
+      observation: normalizeObservation(observation)
+    });
+  } catch (error) {
+    sendJson(socket, {
+      type: "tool_result",
+      id: message.id,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      observation: {}
+    });
+  }
+}
+async function createPlaywrightMcpDriver() {
+  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
+  const packageJsonPath = runtimeRequire.resolve("@playwright/mcp/package.json");
+  const cliPath = (0, import_node_path.join)((0, import_node_path.dirname)(packageJsonPath), "cli.js");
+  const client = new import_client.Client({
+    name: "testmutant-cli",
+    version: "1.0.0"
+  });
+  const transport = new import_stdio.StdioClientTransport({
+    command: process.execPath,
+    args: [cliPath, "--headless"],
+    stderr: "pipe"
+  });
+  await client.connect(transport);
+  return {
+    async callTool(name, args) {
+      return await client.callTool({ name, arguments: args });
+    },
+    async close() {
+      await client.close();
+    }
+  };
+}
+function createDefaultWebSocket(url, options) {
+  return new import_ws.default(url, options);
+}
+function parseAgentMessage(data) {
+  const raw = typeof data === "string" || Buffer.isBuffer(data) ? data.toString() : data instanceof ArrayBuffer ? Buffer.from(data).toString() : String(data);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CliError("TestMutant agent sent invalid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new CliError("TestMutant agent sent an invalid message.");
+  }
+  const message = parsed;
+  if (message.type === "tool_call") {
+    const toolCall = parsed;
+    if (typeof toolCall.id !== "string" || typeof toolCall.name !== "string") {
+      throw new CliError("TestMutant agent sent an invalid tool call.");
+    }
+    return {
+      type: "tool_call",
+      id: toolCall.id,
+      name: toolCall.name,
+      arguments: toolCall.arguments
+    };
+  }
+  if (message.type === "agent_complete" || message.type === "error") {
+    return parsed;
+  }
+  throw new CliError("TestMutant agent sent an unsupported message.");
+}
+function normalizeArguments(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value;
+}
+function normalizeObservation(value) {
+  if (value === void 0) {
+    return {};
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+function isToolErrorObservation(value) {
+  return Boolean(
+    value && typeof value === "object" && "isError" in value && value.isError === true
+  );
+}
+function extractObservationError(value) {
+  if (!value || typeof value !== "object" || !("content" in value)) {
+    return "Browser tool execution failed.";
+  }
+  const content = value.content;
+  if (!Array.isArray(content)) {
+    return "Browser tool execution failed.";
+  }
+  const text = content.map(
+    (item) => item && typeof item === "object" && "type" in item && "text" in item && item.type === "text" && typeof item.text === "string" ? item.text : null
+  ).filter((item) => Boolean(item?.trim())).join("\n");
+  return text || "Browser tool execution failed.";
+}
+function sendJson(socket, value) {
+  socket.send(JSON.stringify(value));
+}
+function formatApiError(message) {
+  return typeof message === "string" && message.trim() ? message : "TestMutant agent generation failed.";
 }
 
 // src/ci-metadata.ts
@@ -384,8 +649,8 @@ function git(args) {
 var import_node_child_process2 = require("child_process");
 var import_promises = require("fs/promises");
 var import_node_os = require("os");
-var import_node_path = require("path");
-var import_node_module = require("module");
+var import_node_path2 = require("path");
+var import_node_module2 = require("module");
 var PLAYWRIGHT_TYPE = "playwright";
 async function runPlaywrightTests(tests, options = {}) {
   const supported = tests.filter(isPlaywrightTest);
@@ -401,7 +666,7 @@ async function runPlaywrightTests(tests, options = {}) {
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
   }
-  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
+  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
   try {
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
@@ -435,7 +700,7 @@ function isPlaywrightTest(test) {
 }
 async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   await (0, import_promises.writeFile)(
-    (0, import_node_path.join)(workDir, "playwright.config.cjs"),
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
       "  timeout: 30000,",
@@ -454,7 +719,7 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
     const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
       test.testId
     )}.spec.ts`;
-    const filePath = (0, import_node_path.join)(workDir, fileName);
+    const filePath = (0, import_node_path2.join)(workDir, fileName);
     await (0, import_promises.writeFile)(filePath, test.source, "utf8");
     writtenTests.push({ test, filePath, fileName });
   }
@@ -547,13 +812,13 @@ function summarize(baseUrl, tests) {
   };
 }
 function getPlaywrightCliPath() {
-  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
-  return (0, import_node_path.join)((0, import_node_path.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  return (0, import_node_path2.join)((0, import_node_path2.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
 }
 function buildNodePath(existing) {
-  const runtimeRequire = (0, import_node_module.createRequire)(__filename);
-  const dependencyPath = (0, import_node_path.dirname)(
-    (0, import_node_path.dirname)((0, import_node_path.dirname)(runtimeRequire.resolve("@playwright/test")))
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  const dependencyPath = (0, import_node_path2.dirname)(
+    (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
 }
@@ -568,7 +833,7 @@ function getPlaywrightTestArgs(workDir, writtenTests) {
     getPlaywrightCliPath(),
     "test",
     "--config",
-    (0, import_node_path.join)(workDir, "playwright.config.cjs"),
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     "--reporter=json",
     ...writtenTests.map((writtenTest) => writtenTest.fileName)
   ];
@@ -698,8 +963,53 @@ async function runCi(options) {
     environmentName: options.environmentName
   });
   const created = await client.createRun(createRunRequest);
-  const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const runTests = created.tests ?? [];
+  const agentGenerator = options.agentGenerator ?? runAgentGeneration;
+  const generationError = await executeAgentGenerationForApiCompletion(
+    agentGenerator,
+    {
+      apiUrl: config.apiUrl,
+      apiKey: config.apiKey,
+      timeoutMs: config.timeoutMs,
+      userAgent: options.userAgent,
+      runId: created.runId
+    }
+  );
+  if (generationError) {
+    const testSummary2 = summarizeGenerationFailure(
+      runTests,
+      createRunRequest.baseUrl,
+      generationError
+    );
+    const completed2 = await client.completeRun(created.runId, {
+      status: "Failed",
+      summary: "Test generation failed.",
+      results: {
+        ...testSummary2,
+        repositoryFullName: createRunRequest.repositoryFullName,
+        branch: createRunRequest.branch,
+        commitSha: createRunRequest.commitSha,
+        ciProvider: createRunRequest.ciProvider,
+        ciRunId: createRunRequest.ciRunId,
+        generatedAtUtc: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      resultJson: null,
+      errorMessage: generationError
+    });
+    if (isEnforceMode(createRunRequest.mode)) {
+      throw new CliError(`TestMutant test generation failed: ${generationError}`, 1);
+    }
+    return {
+      runId: completed2.runId,
+      status: completed2.status,
+      totalTests: testSummary2.total,
+      passedTests: testSummary2.passed,
+      failedTests: testSummary2.failed,
+      tests: testSummary2.tests,
+      baseUrl: testSummary2.baseUrl
+    };
+  }
+  const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const testSummary = await executeTestsForApiCompletion(
     testExecutor,
     runTests,
@@ -772,6 +1082,32 @@ async function executeTestsForApiCompletion(testExecutor, tests, baseUrl) {
       }))
     };
   }
+}
+async function executeAgentGenerationForApiCompletion(agentGenerator, options) {
+  try {
+    await agentGenerator(options);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+function summarizeGenerationFailure(tests, baseUrl, errorMessage) {
+  const results = tests.map((test) => ({
+    testId: test.testId,
+    type: test.type,
+    name: test.name,
+    status: "Failed",
+    errorMessage,
+    durationMs: null
+  }));
+  return {
+    kind: "playwright",
+    baseUrl,
+    total: results.length,
+    passed: 0,
+    failed: results.length,
+    tests: results
+  };
 }
 
 // src/index.ts
@@ -846,7 +1182,7 @@ program.parseAsync(process.argv).catch((error) => {
   process.exitCode = 1;
 });
 function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path2.join)(__dirname, "..", "package.json");
+  const packageJsonPath = (0, import_node_path3.join)(__dirname, "..", "package.json");
   const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
   return {
     name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
