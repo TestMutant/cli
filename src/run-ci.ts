@@ -1,5 +1,4 @@
 import { TestMutantApiClient, type CliRunTest } from "./api-client";
-import { runAgentGeneration } from "./agent-runner";
 import { buildCreateRunRequest } from "./ci-metadata";
 import {
   API_KEY_ENV_VAR,
@@ -78,53 +77,58 @@ export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
 
   const created = await client.createRun(createRunRequest);
   const runTests = created.tests ?? [];
-  const agentGenerator = options.agentGenerator ?? runAgentGeneration;
-  const generationError = await executeAgentGenerationForApiCompletion(
-    agentGenerator,
-    {
-      apiUrl: config.apiUrl,
-      apiKey: config.apiKey,
-      timeoutMs: config.timeoutMs,
-      userAgent: options.userAgent,
-      runId: created.runId,
-    },
-  );
+  const shouldGenerate = isGenerateMode(createRunRequest.mode);
+if (shouldGenerate) {
+    const agentGenerator = options.agentGenerator ?? (await getDefaultAgentGenerator());
 
-  if (generationError) {
-    const testSummary = summarizeGenerationFailure(
-      runTests,
-      createRunRequest.baseUrl,
-      generationError,
+    const generationError = await executeAgentGenerationForApiCompletion(
+        agentGenerator,
+        {
+        apiUrl: config.apiUrl,
+        apiKey: config.apiKey,
+        timeoutMs: config.timeoutMs,
+        userAgent: options.userAgent,
+        runId: created.runId,
+        },
     );
-    const completed = await client.completeRun(created.runId, {
-      status: "Failed",
-      summary: "Test generation failed.",
-      results: {
-        ...testSummary,
-        repositoryFullName: createRunRequest.repositoryFullName,
-        branch: createRunRequest.branch,
-        commitSha: createRunRequest.commitSha,
-        ciProvider: createRunRequest.ciProvider,
-        ciRunId: createRunRequest.ciRunId,
-        generatedAtUtc: new Date().toISOString(),
-      },
-      resultJson: null,
-      errorMessage: generationError,
-    });
 
-    if (isEnforceMode(createRunRequest.mode)) {
-      throw new CliError(`TestMutant test generation failed: ${generationError}`, 1);
+    if (generationError) {
+        const testSummary = summarizeGenerationFailure(
+        runTests,
+        createRunRequest.baseUrl,
+        generationError,
+        );
+
+        const completed = await client.completeRun(created.runId, {
+        status: "Failed",
+        summary: "Test generation failed.",
+        results: {
+            ...testSummary,
+            repositoryFullName: createRunRequest.repositoryFullName,
+            branch: createRunRequest.branch,
+            commitSha: createRunRequest.commitSha,
+            ciProvider: createRunRequest.ciProvider,
+            ciRunId: createRunRequest.ciRunId,
+            generatedAtUtc: new Date().toISOString(),
+        },
+        resultJson: null,
+        errorMessage: generationError,
+        });
+
+        if (isEnforceMode(createRunRequest.mode)) {
+        throw new CliError(`TestMutant test generation failed: ${generationError}`, 1);
+        }
+
+        return {
+        runId: completed.runId,
+        status: completed.status,
+        totalTests: testSummary.total,
+        passedTests: testSummary.passed,
+        failedTests: testSummary.failed,
+        tests: testSummary.tests,
+        baseUrl: testSummary.baseUrl,
+        };
     }
-
-    return {
-      runId: completed.runId,
-      status: completed.status,
-      totalTests: testSummary.total,
-      passedTests: testSummary.passed,
-      failedTests: testSummary.failed,
-      tests: testSummary.tests,
-      baseUrl: testSummary.baseUrl,
-    };
   }
 
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
@@ -185,7 +189,15 @@ function applyOptionEnvironmentOverrides(options: RunCiOptions): void {
     process.env[API_URL_ENV_VAR] = DEFAULT_API_URL;
   }
 }
+function isGenerateMode(mode: string | null | undefined): boolean {
+  const normalized = mode?.trim().toLowerCase();
+  return normalized === "generate" || normalized === "author";
+}
 
+async function getDefaultAgentGenerator(): Promise<RunCiAgentGenerator> {
+  const module = await import("./agent-runner");
+  return module.runAgentGeneration;
+}
 function isEnforceMode(mode: string | null | undefined): boolean {
   return mode?.trim().toLowerCase() === "enforce";
 }

@@ -30,5 +30,22 @@ inputs:
     required: false
 
 runs:
-  using: node20
-  main: dist/action.js
+  using: composite
+  steps:
+    - name: Install TestMutant action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev
+
+    - name: Run TestMutant
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: node dist/action.js
+      env:
+        TESTMUTANT_API_KEY: ${{ env.TESTMUTANT_API_KEY }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_API_URL: ${{ inputs.api_url }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_BASE_URL: ${{ inputs.base_url }}
+        INPUT_ENVIRONMENT_NAME: ${{ inputs.environment_name }}
