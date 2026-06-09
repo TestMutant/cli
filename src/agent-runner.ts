@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { CliError } from "./config";
+import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import WebSocket from "ws";
 
 const SUPPORTED_TOOLS = new Set([
@@ -233,6 +234,8 @@ async function handleToolCall(
 }
 
 async function createDirectPlaywrightDriver(): Promise<BrowserDriver> {
+  await ensurePlaywrightBrowserInstalled();
+
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
 

@@ -45,6 +45,7 @@
     "@playwright/test": "^1.60.0",
     "commander": "^14.0.3",
     "dotenv": "^17.4.2",
+    "playwright": "^1.60.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {
