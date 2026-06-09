@@ -42,6 +42,7 @@ test("runCi completes the API run with executed test results", async () => {
         baseUrl: "https://preview.example.test",
         mode: "Advisory",
         userAgent: "testmutant-cli/test",
+        agentGenerator: async () => {},
         testExecutor: async (tests, options) => {
           assert.equal(tests.length, 1);
           assert.equal(options.baseUrl, "https://preview.example.test");
@@ -119,6 +120,7 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
             apiUrl: "https://api.example.test",
             mode: "Enforce",
             userAgent: "testmutant-cli/test",
+            agentGenerator: async () => {},
             testExecutor: async () => buildSummary({ failed: 1 }),
           }),
         (error: unknown) =>
@@ -177,6 +179,7 @@ test("runCi reports runner errors to the API before returning", async () => {
         apiUrl: "https://api.example.test",
         mode: "Advisory",
         userAgent: "testmutant-cli/test",
+        agentGenerator: async () => {},
         testExecutor: async () => {
           throw new Error("Playwright runtime is unavailable");
         },
@@ -195,6 +198,132 @@ test("runCi reports runner errors to the API before returning", async () => {
   assert.equal(
     completeBody.results?.tests?.[0]?.errorMessage,
     "Playwright runtime is unavailable",
+  );
+});
+
+test("runCi runs agent generation before executing returned tests", async () => {
+  const env = withCiEnv();
+  const events: string[] = [];
+  const fetchMock = new FetchQueue([
+    jsonResponse(
+      {
+        runId: "11111111-1111-1111-1111-111111111111",
+        organizationId: "22222222-2222-2222-2222-222222222222",
+        projectId: "33333333-3333-3333-3333-333333333333",
+        projectName: "Acme",
+        repositoryId: "44444444-4444-4444-4444-444444444444",
+        repositoryFullName: "TestMutant/cli",
+        status: "Running",
+        tests: [
+          {
+            testId: "55555555-5555-5555-5555-555555555555",
+            type: "playwright",
+            name: "loads home",
+            source: "test source",
+          },
+        ],
+      },
+      201,
+    ),
+    jsonResponse({
+      ok: true,
+      runId: "11111111-1111-1111-1111-111111111111",
+      status: "Passed",
+    }),
+  ]);
+
+  try {
+    await fetchMock.run(async () => {
+      await runCi({
+        apiKey: "test-key",
+        apiUrl: "https://api.example.test",
+        baseUrl: "https://preview.example.test",
+        userAgent: "testmutant-cli/test",
+        agentGenerator: async (options) => {
+          events.push("agent");
+          assert.equal(options.apiUrl, "https://api.example.test");
+          assert.equal(options.apiKey, "test-key");
+          assert.equal(options.userAgent, "testmutant-cli/test");
+          assert.equal(options.runId, "11111111-1111-1111-1111-111111111111");
+        },
+        testExecutor: async () => {
+          events.push("tests");
+          return buildSummary({ failed: 0 });
+        },
+      });
+    });
+  } finally {
+    env.restore();
+  }
+
+  assert.deepEqual(events, ["agent", "tests"]);
+});
+
+test("runCi completes failed generation before returning", async () => {
+  const env = withCiEnv();
+  const fetchMock = new FetchQueue([
+    jsonResponse(
+      {
+        runId: "11111111-1111-1111-1111-111111111111",
+        organizationId: "22222222-2222-2222-2222-222222222222",
+        projectId: "33333333-3333-3333-3333-333333333333",
+        projectName: "Acme",
+        repositoryId: "44444444-4444-4444-4444-444444444444",
+        repositoryFullName: "TestMutant/cli",
+        status: "Running",
+        tests: [
+          {
+            testId: "55555555-5555-5555-5555-555555555555",
+            type: "playwright",
+            name: "loads home",
+            source: "test source",
+          },
+        ],
+      },
+      201,
+    ),
+    jsonResponse({
+      ok: true,
+      runId: "11111111-1111-1111-1111-111111111111",
+      status: "Failed",
+    }),
+  ]);
+
+  try {
+    await fetchMock.run(async () => {
+      const result = await runCi({
+        apiKey: "test-key",
+        apiUrl: "https://api.example.test",
+        mode: "Advisory",
+        userAgent: "testmutant-cli/test",
+        agentGenerator: async () => {
+          throw new Error("Agent websocket rejected the run");
+        },
+        testExecutor: async () => {
+          throw new Error("Tests should not run after generation failure");
+        },
+      });
+
+      assert.equal(result.status, "Failed");
+      assert.equal(result.failedTests, 1);
+    });
+  } finally {
+    env.restore();
+  }
+
+  assert.equal(fetchMock.calls.length, 2);
+  const completeBody = JSON.parse(fetchMock.calls[1]?.init.body ?? "{}") as {
+    status?: string;
+    summary?: string;
+    errorMessage?: string;
+    results?: { tests?: Array<{ errorMessage?: string }> };
+  };
+  assert.equal(completeBody.status, "Failed");
+  assert.equal(completeBody.summary, "Test generation failed.");
+  assert.equal(completeBody.errorMessage, "Agent websocket rejected the run");
+  assert.equal(
+    completeBody.results?.tests?.[0]?.errorMessage,
+    "Agent websocket rejected the run",
   );
 });
 

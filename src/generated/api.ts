@@ -68,6 +68,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cli/v1/runs/{runId}/agent/ws": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["CliV1_RunAgentWebSocket"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -131,13 +147,6 @@ export interface components {
             status: string;
             tests: components["schemas"]["CliRunTest"][];
         };
-        CliRunTest: {
-            /** Format: uuid */
-            testId: string;
-            type: string;
-            name: string;
-            source: string;
-        };
         CliRunDetailResponse: {
             /** Format: uuid */
             runId: string;
@@ -171,6 +180,13 @@ export interface components {
             errorMessage: null | string;
             /** Format: date-time */
             createdAtUtc: string;
+        };
+        CliRunTest: {
+            /** Format: uuid */
+            testId: string;
+            type: string;
+            name: string;
+            source: string;
         };
         HttpValidationProblemDetails: {
             type?: null | string;
@@ -350,6 +366,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CliRunDetailResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CliV1_RunAgentWebSocket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Switching Protocols */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
                 };
             };
             /** @description Unauthorized */
