@@ -114,6 +114,8 @@ export interface components {
             pullRequestNumber: null | number | string;
             ciProvider: null | string;
             ciRunId: null | string;
+            /** Format: uuid */
+            requirementId?: null | string;
         };
         CliPingRequest: {
             repositoryProvider: null | string;
@@ -419,6 +421,15 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Payment Required */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
             };
             /** @description Not Found */
             404: {

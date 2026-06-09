@@ -13,6 +13,7 @@ import {
   type TestRunSummary,
   type TestRunResult
 } from "./playwright-runner";
+import type { AgentGenerationResult } from "./agent-runner";
 
 export type RunCiOptions = {
   apiKey?: string;
@@ -51,7 +52,8 @@ export type RunCiAgentGenerator = (options: {
   timeoutMs: number;
   userAgent: string;
   runId: string;
-}) => Promise<void>;
+  baseUrl?: string | null;
+}) => Promise<AgentGenerationResult>;
 
 export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
   applyOptionEnvironmentOverrides(options);
@@ -81,7 +83,7 @@ export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
 if (shouldGenerate) {
     const agentGenerator = options.agentGenerator ?? (await getDefaultAgentGenerator());
 
-    const generationError = await executeAgentGenerationForApiCompletion(
+    const generationResult = await executeAgentGenerationForApiCompletion(
         agentGenerator,
         {
         apiUrl: config.apiUrl,
@@ -89,46 +91,39 @@ if (shouldGenerate) {
         timeoutMs: config.timeoutMs,
         userAgent: options.userAgent,
         runId: created.runId,
+        baseUrl: createRunRequest.baseUrl,
         },
     );
 
-    if (generationError) {
-        const testSummary = summarizeGenerationFailure(
-        runTests,
-        createRunRequest.baseUrl,
-        generationError,
+    if (!generationResult.ok) {
+      if (isEnforceMode(createRunRequest.mode)) {
+        throw new CliError(
+          `TestMutant test generation failed: ${generationResult.errorMessage}`,
+          1,
         );
+      }
 
-        const completed = await client.completeRun(created.runId, {
+      return {
+        runId: created.runId,
         status: "Failed",
-        summary: "Test generation failed.",
-        results: {
-            ...testSummary,
-            repositoryFullName: createRunRequest.repositoryFullName,
-            branch: createRunRequest.branch,
-            commitSha: createRunRequest.commitSha,
-            ciProvider: createRunRequest.ciProvider,
-            ciRunId: createRunRequest.ciRunId,
-            generatedAtUtc: new Date().toISOString(),
-        },
-        resultJson: null,
-        errorMessage: generationError,
-        });
-
-        if (isEnforceMode(createRunRequest.mode)) {
-        throw new CliError(`TestMutant test generation failed: ${generationError}`, 1);
-        }
-
-        return {
-        runId: completed.runId,
-        status: completed.status,
-        totalTests: testSummary.total,
-        passedTests: testSummary.passed,
-        failedTests: testSummary.failed,
-        tests: testSummary.tests,
-        baseUrl: testSummary.baseUrl,
-        };
+        totalTests: 0,
+        passedTests: 0,
+        failedTests: 0,
+        tests: [],
+        baseUrl: createRunRequest.baseUrl ?? null,
+      };
     }
+
+    const validationSummary = generationResult.result.validationSummary;
+    return {
+      runId: created.runId,
+      status: "Passed",
+      totalTests: validationSummary?.total ?? 0,
+      passedTests: validationSummary?.passed ?? 0,
+      failedTests: validationSummary?.failed ?? 0,
+      tests: validationSummary?.tests,
+      baseUrl: validationSummary?.baseUrl ?? createRunRequest.baseUrl ?? null,
+    };
   }
 
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
@@ -233,35 +228,19 @@ async function executeTestsForApiCompletion(
 async function executeAgentGenerationForApiCompletion(
   agentGenerator: RunCiAgentGenerator,
   options: Parameters<RunCiAgentGenerator>[0],
-): Promise<string | null> {
+): Promise<
+  | { ok: true; result: AgentGenerationResult }
+  | { ok: false; errorMessage: string }
+> {
   try {
-    await agentGenerator(options);
-    return null;
+    return {
+      ok: true,
+      result: await agentGenerator(options),
+    };
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
   }
-}
-
-function summarizeGenerationFailure(
-  tests: CliRunTest[],
-  baseUrl: string | null,
-  errorMessage: string,
-): TestRunSummary {
-  const results = tests.map<TestRunResult>((test) => ({
-    testId: test.testId,
-    type: test.type,
-    name: test.name,
-    status: "Failed",
-    errorMessage,
-    durationMs: null,
-  }));
-
-  return {
-    kind: "playwright",
-    baseUrl,
-    total: results.length,
-    passed: 0,
-    failed: results.length,
-    tests: results,
-  };
 }

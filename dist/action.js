@@ -127,6 +127,282 @@ var init_playwright_install = __esm({
   }
 });
 
+// src/playwright-runner.ts
+async function runPlaywrightTests(tests, options = {}) {
+  const supported = tests.filter(isPlaywrightTest);
+  const unsupported = tests.filter((test) => !isPlaywrightTest(test));
+  const unsupportedResults = unsupported.map((test) => ({
+    testId: test.testId,
+    type: test.type,
+    name: test.name,
+    status: "Failed",
+    errorMessage: `Unsupported test type: ${test.type}`,
+    durationMs: null
+  }));
+  if (supported.length === 0) {
+    return summarize(options.baseUrl ?? null, unsupportedResults);
+  }
+  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
+  try {
+    const writtenTests = await writePlaywrightWorkspace(
+      workDir,
+      supported,
+      options.baseUrl ?? null
+    );
+    const commandRunner = options.commandRunner ?? defaultCommandRunner;
+    await ensurePlaywrightBrowserInstalled();
+    const result = await commandRunner(
+      process.execPath,
+      getPlaywrightTestArgs(workDir, writtenTests),
+      {
+        cwd: workDir,
+        env: {
+          ...process.env,
+          NODE_PATH: buildNodePath(process.env.NODE_PATH)
+        }
+      }
+    );
+    const mappedResults = mapPlaywrightResults(writtenTests, result);
+    return summarize(options.baseUrl ?? null, [
+      ...mappedResults,
+      ...unsupportedResults
+    ]);
+  } finally {
+    await (0, import_promises.rm)(workDir, { recursive: true, force: true });
+  }
+}
+function isPlaywrightTest(test) {
+  return test.type.trim().toLowerCase() === PLAYWRIGHT_TYPE;
+}
+async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
+  await (0, import_promises.writeFile)(
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
+    [
+      "module.exports = {",
+      "  timeout: 30000,",
+      "  workers: 1,",
+      "  use: {",
+      `    baseURL: ${JSON.stringify(baseUrl)},`,
+      "  },",
+      "};",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  const writtenTests = [];
+  for (let index = 0; index < tests.length; index += 1) {
+    const test = tests[index];
+    const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
+      test.testId
+    )}.spec.ts`;
+    const filePath = (0, import_node_path2.join)(workDir, fileName);
+    await (0, import_promises.writeFile)(filePath, test.source, "utf8");
+    writtenTests.push({ test, filePath, fileName });
+  }
+  return writtenTests;
+}
+function mapPlaywrightResults(writtenTests, commandResult) {
+  const report = parsePlaywrightReport(commandResult.stdout);
+  const fileResults = /* @__PURE__ */ new Map();
+  const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
+  if (report) {
+    for (const suite of report.suites ?? []) {
+      collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
+    }
+  }
+  return writtenTests.map(({ test, fileName }) => {
+    const mapped = fileResults.get(fileName);
+    if (mapped) {
+      return mapped;
+    }
+    return {
+      testId: test.testId,
+      type: test.type,
+      name: test.name,
+      status: commandResult.exitCode === 0 ? "Passed" : "Failed",
+      errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
+      durationMs: null
+    };
+  });
+}
+function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
+  const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
+  const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
+  if (writtenTest && fileName) {
+    const specs = suite.specs ?? [];
+    const failedSpec = specs.find((spec) => spec.ok === false);
+    const failedCase = specs.flatMap((spec) => spec.tests ?? []).find((testCase) => testCase.ok === false);
+    const result = failedCase?.results?.find(
+      (caseResult) => caseResult.status && caseResult.status !== "passed"
+    );
+    fileResults.set(fileName, {
+      testId: writtenTest.test.testId,
+      type: writtenTest.test.type,
+      name: writtenTest.test.name,
+      status: failedSpec || failedCase ? "Failed" : "Passed",
+      errorMessage: failedSpec || failedCase ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
+      durationMs: sumDurations(specs)
+    });
+  }
+  for (const child of suite.suites ?? []) {
+    collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+  }
+}
+function parsePlaywrightReport(stdout) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+function firstReportError(report) {
+  const error = report?.errors?.find(
+    (candidate) => Boolean(candidate.message ?? candidate.stack)
+  );
+  return error ? formatError(error) : null;
+}
+function formatResultError(result) {
+  if (!result) {
+    return null;
+  }
+  const error = result.error ?? result.errors?.[0];
+  return error ? formatError(error) : null;
+}
+function formatError(error) {
+  return truncate2(firstNonEmpty(error.message, error.stack) ?? "Playwright test failed.");
+}
+function sumDurations(specs) {
+  const duration = specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).reduce((total, result) => total + (result.duration ?? 0), 0);
+  return duration > 0 ? duration : null;
+}
+function summarize(baseUrl, tests) {
+  const passed = tests.filter((test) => test.status === "Passed").length;
+  const failed = tests.length - passed;
+  return {
+    kind: "playwright",
+    baseUrl,
+    total: tests.length,
+    passed,
+    failed,
+    tests
+  };
+}
+function getPlaywrightCliPath() {
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  return (0, import_node_path2.join)((0, import_node_path2.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
+}
+function buildNodePath(existing) {
+  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
+  const dependencyPath = (0, import_node_path2.dirname)(
+    (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
+  );
+  return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
+}
+function getPlaywrightTestArgs(workDir, writtenTests) {
+  return [
+    getPlaywrightCliPath(),
+    "test",
+    "--config",
+    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
+    "--reporter=json",
+    ...writtenTests.map((writtenTest) => writtenTest.fileName)
+  ];
+}
+function meaningfulStderr(stderr) {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => {
+    if (line.includes("DeprecationWarning")) {
+      return false;
+    }
+    if (line.startsWith("(node:") && line.includes("[DEP")) {
+      return false;
+    }
+    if (line.includes("Use `node --trace-deprecation")) {
+      return false;
+    }
+    return true;
+  });
+  return lines.length > 0 ? truncate2(lines.join("\n")) : null;
+}
+function extractUsefulPlaywrightFailure(stdout) {
+  const report = parsePlaywrightReport(stdout);
+  if (!report) {
+    return firstNonEmpty(stdout);
+  }
+  const errors = [];
+  for (const suite of report.suites ?? []) {
+    collectFailureMessages(suite, errors);
+  }
+  return errors.length > 0 ? truncate2(errors.join("\n\n")) : null;
+}
+function collectFailureMessages(suite, errors) {
+  for (const spec of suite.specs ?? []) {
+    for (const testCase of spec.tests ?? []) {
+      for (const result of testCase.results ?? []) {
+        const error = result.error ?? result.errors?.[0];
+        const message = error ? formatError(error) : null;
+        if (message) {
+          errors.push(`${spec.title ?? "Playwright test"}: ${message}`);
+        }
+      }
+    }
+  }
+  for (const child of suite.suites ?? []) {
+    collectFailureMessages(child, errors);
+  }
+}
+function delimiter() {
+  return process.platform === "win32" ? ";" : ":";
+}
+function defaultCommandRunner(command, args, options) {
+  return new Promise((resolve) => {
+    (0, import_node_child_process3.execFile)(
+      command,
+      args,
+      {
+        cwd: options.cwd,
+        env: options.env,
+        maxBuffer: 10 * 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+        resolve({
+          exitCode,
+          stdout,
+          stderr
+        });
+      }
+    );
+  });
+}
+function safeFilePart(value) {
+  return value.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
+}
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return truncate2(trimmed);
+    }
+  }
+  return null;
+}
+function truncate2(value, maxLength = 1e3) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
+}
+var import_node_child_process3, import_promises, import_node_os, import_node_path2, import_node_module2, PLAYWRIGHT_TYPE;
+var init_playwright_runner = __esm({
+  "src/playwright-runner.ts"() {
+    "use strict";
+    import_node_child_process3 = require("child_process");
+    import_promises = require("fs/promises");
+    import_node_os = require("os");
+    import_node_path2 = require("path");
+    init_playwright_install();
+    import_node_module2 = require("module");
+    PLAYWRIGHT_TYPE = "playwright";
+  }
+});
+
 // src/agent-runner.ts
 var agent_runner_exports = {};
 __export(agent_runner_exports, {
@@ -148,9 +424,9 @@ function buildAgentWebSocketUrl(apiUrl, runId) {
   return url.toString();
 }
 async function runAgentGeneration(options) {
-  const browserDriver = options.browserDriver ?? await createDirectPlaywrightDriver();
+  const browserDriver = options.browserDriver ?? await createDirectPlaywrightDriver(options.baseUrl ?? null);
   try {
-    await runAgentWebSocketLoop(options, browserDriver);
+    return await runAgentWebSocketLoop(options, browserDriver);
   } finally {
     await browserDriver.close();
   }
@@ -167,6 +443,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
   let settled = false;
   let activeToolCalls = 0;
   let closeAfterToolCalls = false;
+  let generationResult = null;
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       fail2(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
@@ -212,6 +489,13 @@ async function runAgentWebSocketLoop(options, browserDriver) {
     async function handleMessage(data) {
       const message = parseAgentMessage(data);
       if (message.type === "agent_complete") {
+        generationResult = {
+          testId: typeof message.testId === "string" ? message.testId : null,
+          name: typeof message.name === "string" ? message.name : null,
+          sourceLength: typeof message.sourceLength === "number" ? message.sourceLength : null,
+          attemptCount: typeof message.attemptCount === "number" ? message.attemptCount : 0,
+          validationSummary: parseValidationSummary(message.validationSummary)
+        };
         finish();
         return;
       }
@@ -230,6 +514,13 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       }
     }
   });
+  return generationResult ?? {
+    testId: null,
+    name: null,
+    sourceLength: null,
+    attemptCount: 0,
+    validationSummary: null
+  };
 }
 async function handleToolCall(socket, browserDriver, message) {
   if (!SUPPORTED_TOOLS.has(message.name)) {
@@ -271,7 +562,7 @@ async function handleToolCall(socket, browserDriver, message) {
     });
   }
 }
-async function createDirectPlaywrightDriver() {
+async function createDirectPlaywrightDriver(baseUrl) {
   await ensurePlaywrightBrowserInstalled();
   const browser = await import_playwright.chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -297,12 +588,39 @@ async function createDirectPlaywrightDriver() {
           return await snapshotPage(page);
         }
         case "browser_evaluate": {
-          const script = getRequiredString(args, "script");
-          const result = await page.evaluate(script);
+          const expression = getRequiredString(args, "expression");
+          const result = await page.evaluate(expression);
           return {
             url: page.url(),
             title: await page.title(),
             result
+          };
+        }
+        case "playwright_validate_test": {
+          const draftName = getRequiredString(args, "name");
+          const source = getRequiredString(args, "source");
+          const summary = await runPlaywrightTests(
+            [
+              {
+                testId: "generated-draft",
+                type: "playwright",
+                name: draftName,
+                source
+              }
+            ],
+            { baseUrl }
+          );
+          return {
+            passed: summary.failed === 0 && summary.total > 0,
+            kind: summary.kind,
+            summary: {
+              total: summary.total,
+              passed: summary.passed,
+              failed: summary.failed,
+              baseUrl: summary.baseUrl
+            },
+            tests: summary.tests,
+            failureExcerpt: summary.tests.find((test) => test.status === "Failed")?.errorMessage ?? null
           };
         }
         default:
@@ -360,6 +678,30 @@ function parseAgentMessage(data) {
   }
   throw new CliError("TestMutant agent sent an unsupported message.");
 }
+function parseValidationSummary(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const summary = value;
+  if (typeof summary.kind !== "string" || typeof summary.total !== "number" || typeof summary.passed !== "number" || typeof summary.failed !== "number" || !Array.isArray(summary.tests)) {
+    return null;
+  }
+  return {
+    kind: "playwright",
+    baseUrl: typeof summary.baseUrl === "string" ? summary.baseUrl : null,
+    total: summary.total,
+    passed: summary.passed,
+    failed: summary.failed,
+    tests: summary.tests.filter((item) => Boolean(item && typeof item === "object")).map((item) => ({
+      testId: typeof item.testId === "string" ? item.testId : "",
+      type: typeof item.type === "string" ? item.type : "",
+      name: typeof item.name === "string" ? item.name : "",
+      status: item.status === "Passed" ? "Passed" : "Failed",
+      errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
+      durationMs: typeof item.durationMs === "number" ? item.durationMs : null
+    }))
+  };
+}
 function normalizeArguments(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -404,12 +746,14 @@ var init_agent_runner = __esm({
     init_config();
     init_playwright_install();
     import_ws = __toESM(require("ws"));
+    init_playwright_runner();
     SUPPORTED_TOOLS = /* @__PURE__ */ new Set([
       "browser_navigate",
       "browser_snapshot",
       "browser_click",
       "browser_type",
-      "browser_evaluate"
+      "browser_evaluate",
+      "playwright_validate_test"
     ]);
   }
 });
@@ -746,278 +1090,7 @@ function git(args) {
 
 // src/run-ci.ts
 init_config();
-
-// src/playwright-runner.ts
-var import_node_child_process3 = require("child_process");
-var import_promises = require("fs/promises");
-var import_node_os = require("os");
-var import_node_path2 = require("path");
-init_playwright_install();
-var import_node_module2 = require("module");
-var PLAYWRIGHT_TYPE = "playwright";
-async function runPlaywrightTests(tests, options = {}) {
-  const supported = tests.filter(isPlaywrightTest);
-  const unsupported = tests.filter((test) => !isPlaywrightTest(test));
-  const unsupportedResults = unsupported.map((test) => ({
-    testId: test.testId,
-    type: test.type,
-    name: test.name,
-    status: "Failed",
-    errorMessage: `Unsupported test type: ${test.type}`,
-    durationMs: null
-  }));
-  if (supported.length === 0) {
-    return summarize(options.baseUrl ?? null, unsupportedResults);
-  }
-  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
-  try {
-    const writtenTests = await writePlaywrightWorkspace(
-      workDir,
-      supported,
-      options.baseUrl ?? null
-    );
-    const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    await ensurePlaywrightBrowserInstalled();
-    const result = await commandRunner(
-      process.execPath,
-      getPlaywrightTestArgs(workDir, writtenTests),
-      {
-        cwd: workDir,
-        env: {
-          ...process.env,
-          NODE_PATH: buildNodePath(process.env.NODE_PATH)
-        }
-      }
-    );
-    const mappedResults = mapPlaywrightResults(writtenTests, result);
-    return summarize(options.baseUrl ?? null, [
-      ...mappedResults,
-      ...unsupportedResults
-    ]);
-  } finally {
-    await (0, import_promises.rm)(workDir, { recursive: true, force: true });
-  }
-}
-function isPlaywrightTest(test) {
-  return test.type.trim().toLowerCase() === PLAYWRIGHT_TYPE;
-}
-async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
-  await (0, import_promises.writeFile)(
-    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
-    [
-      "module.exports = {",
-      "  timeout: 30000,",
-      "  workers: 1,",
-      "  use: {",
-      `    baseURL: ${JSON.stringify(baseUrl)},`,
-      "  },",
-      "};",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  const writtenTests = [];
-  for (let index = 0; index < tests.length; index += 1) {
-    const test = tests[index];
-    const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
-      test.testId
-    )}.spec.ts`;
-    const filePath = (0, import_node_path2.join)(workDir, fileName);
-    await (0, import_promises.writeFile)(filePath, test.source, "utf8");
-    writtenTests.push({ test, filePath, fileName });
-  }
-  return writtenTests;
-}
-function mapPlaywrightResults(writtenTests, commandResult) {
-  const report = parsePlaywrightReport(commandResult.stdout);
-  const fileResults = /* @__PURE__ */ new Map();
-  const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
-  if (report) {
-    for (const suite of report.suites ?? []) {
-      collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
-    }
-  }
-  return writtenTests.map(({ test, fileName }) => {
-    const mapped = fileResults.get(fileName);
-    if (mapped) {
-      return mapped;
-    }
-    return {
-      testId: test.testId,
-      type: test.type,
-      name: test.name,
-      status: commandResult.exitCode === 0 ? "Passed" : "Failed",
-      errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
-      durationMs: null
-    };
-  });
-}
-function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
-  const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
-  const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
-  if (writtenTest && fileName) {
-    const specs = suite.specs ?? [];
-    const failedSpec = specs.find((spec) => spec.ok === false);
-    const failedCase = specs.flatMap((spec) => spec.tests ?? []).find((testCase) => testCase.ok === false);
-    const result = failedCase?.results?.find(
-      (caseResult) => caseResult.status && caseResult.status !== "passed"
-    );
-    fileResults.set(fileName, {
-      testId: writtenTest.test.testId,
-      type: writtenTest.test.type,
-      name: writtenTest.test.name,
-      status: failedSpec || failedCase ? "Failed" : "Passed",
-      errorMessage: failedSpec || failedCase ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
-      durationMs: sumDurations(specs)
-    });
-  }
-  for (const child of suite.suites ?? []) {
-    collectSuiteResults(child, writtenTests, fileResults, fallbackError);
-  }
-}
-function parsePlaywrightReport(stdout) {
-  try {
-    return JSON.parse(stdout);
-  } catch {
-    return null;
-  }
-}
-function firstReportError(report) {
-  const error = report?.errors?.find(
-    (candidate) => Boolean(candidate.message ?? candidate.stack)
-  );
-  return error ? formatError(error) : null;
-}
-function formatResultError(result) {
-  if (!result) {
-    return null;
-  }
-  const error = result.error ?? result.errors?.[0];
-  return error ? formatError(error) : null;
-}
-function formatError(error) {
-  return truncate2(firstNonEmpty(error.message, error.stack) ?? "Playwright test failed.");
-}
-function sumDurations(specs) {
-  const duration = specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).reduce((total, result) => total + (result.duration ?? 0), 0);
-  return duration > 0 ? duration : null;
-}
-function summarize(baseUrl, tests) {
-  const passed = tests.filter((test) => test.status === "Passed").length;
-  const failed = tests.length - passed;
-  return {
-    kind: "playwright",
-    baseUrl,
-    total: tests.length,
-    passed,
-    failed,
-    tests
-  };
-}
-function getPlaywrightCliPath() {
-  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
-  return (0, import_node_path2.join)((0, import_node_path2.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
-}
-function buildNodePath(existing) {
-  const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
-  const dependencyPath = (0, import_node_path2.dirname)(
-    (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
-  );
-  return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
-}
-function getPlaywrightTestArgs(workDir, writtenTests) {
-  return [
-    getPlaywrightCliPath(),
-    "test",
-    "--config",
-    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
-    "--reporter=json",
-    ...writtenTests.map((writtenTest) => writtenTest.fileName)
-  ];
-}
-function meaningfulStderr(stderr) {
-  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => {
-    if (line.includes("DeprecationWarning")) {
-      return false;
-    }
-    if (line.startsWith("(node:") && line.includes("[DEP")) {
-      return false;
-    }
-    if (line.includes("Use `node --trace-deprecation")) {
-      return false;
-    }
-    return true;
-  });
-  return lines.length > 0 ? truncate2(lines.join("\n")) : null;
-}
-function extractUsefulPlaywrightFailure(stdout) {
-  const report = parsePlaywrightReport(stdout);
-  if (!report) {
-    return firstNonEmpty(stdout);
-  }
-  const errors = [];
-  for (const suite of report.suites ?? []) {
-    collectFailureMessages(suite, errors);
-  }
-  return errors.length > 0 ? truncate2(errors.join("\n\n")) : null;
-}
-function collectFailureMessages(suite, errors) {
-  for (const spec of suite.specs ?? []) {
-    for (const testCase of spec.tests ?? []) {
-      for (const result of testCase.results ?? []) {
-        const error = result.error ?? result.errors?.[0];
-        const message = error ? formatError(error) : null;
-        if (message) {
-          errors.push(`${spec.title ?? "Playwright test"}: ${message}`);
-        }
-      }
-    }
-  }
-  for (const child of suite.suites ?? []) {
-    collectFailureMessages(child, errors);
-  }
-}
-function delimiter() {
-  return process.platform === "win32" ? ";" : ":";
-}
-function defaultCommandRunner(command, args, options) {
-  return new Promise((resolve) => {
-    (0, import_node_child_process3.execFile)(
-      command,
-      args,
-      {
-        cwd: options.cwd,
-        env: options.env,
-        maxBuffer: 10 * 1024 * 1024
-      },
-      (error, stdout, stderr) => {
-        const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-        resolve({
-          exitCode,
-          stdout,
-          stderr
-        });
-      }
-    );
-  });
-}
-function safeFilePart(value) {
-  return value.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
-}
-function firstNonEmpty(...values) {
-  for (const value of values) {
-    const trimmed = value?.trim();
-    if (trimmed) {
-      return truncate2(trimmed);
-    }
-  }
-  return null;
-}
-function truncate2(value, maxLength = 1e3) {
-  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
-}
-
-// src/run-ci.ts
+init_playwright_runner();
 async function runCi(options) {
   applyOptionEnvironmentOverrides(options);
   const config = resolveConfig({
@@ -1041,50 +1114,44 @@ async function runCi(options) {
   const shouldGenerate = isGenerateMode(createRunRequest.mode);
   if (shouldGenerate) {
     const agentGenerator = options.agentGenerator ?? await getDefaultAgentGenerator();
-    const generationError = await executeAgentGenerationForApiCompletion(
+    const generationResult = await executeAgentGenerationForApiCompletion(
       agentGenerator,
       {
         apiUrl: config.apiUrl,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
         userAgent: options.userAgent,
-        runId: created.runId
+        runId: created.runId,
+        baseUrl: createRunRequest.baseUrl
       }
     );
-    if (generationError) {
-      const testSummary2 = summarizeGenerationFailure(
-        runTests,
-        createRunRequest.baseUrl,
-        generationError
-      );
-      const completed2 = await client.completeRun(created.runId, {
-        status: "Failed",
-        summary: "Test generation failed.",
-        results: {
-          ...testSummary2,
-          repositoryFullName: createRunRequest.repositoryFullName,
-          branch: createRunRequest.branch,
-          commitSha: createRunRequest.commitSha,
-          ciProvider: createRunRequest.ciProvider,
-          ciRunId: createRunRequest.ciRunId,
-          generatedAtUtc: (/* @__PURE__ */ new Date()).toISOString()
-        },
-        resultJson: null,
-        errorMessage: generationError
-      });
+    if (!generationResult.ok) {
       if (isEnforceMode(createRunRequest.mode)) {
-        throw new CliError(`TestMutant test generation failed: ${generationError}`, 1);
+        throw new CliError(
+          `TestMutant test generation failed: ${generationResult.errorMessage}`,
+          1
+        );
       }
       return {
-        runId: completed2.runId,
-        status: completed2.status,
-        totalTests: testSummary2.total,
-        passedTests: testSummary2.passed,
-        failedTests: testSummary2.failed,
-        tests: testSummary2.tests,
-        baseUrl: testSummary2.baseUrl
+        runId: created.runId,
+        status: "Failed",
+        totalTests: 0,
+        passedTests: 0,
+        failedTests: 0,
+        tests: [],
+        baseUrl: createRunRequest.baseUrl ?? null
       };
     }
+    const validationSummary = generationResult.result.validationSummary;
+    return {
+      runId: created.runId,
+      status: "Passed",
+      totalTests: validationSummary?.total ?? 0,
+      passedTests: validationSummary?.passed ?? 0,
+      failedTests: validationSummary?.failed ?? 0,
+      tests: validationSummary?.tests,
+      baseUrl: validationSummary?.baseUrl ?? createRunRequest.baseUrl ?? null
+    };
   }
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const testSummary = await executeTestsForApiCompletion(
@@ -1170,29 +1237,16 @@ async function executeTestsForApiCompletion(testExecutor, tests, baseUrl) {
 }
 async function executeAgentGenerationForApiCompletion(agentGenerator, options) {
   try {
-    await agentGenerator(options);
-    return null;
+    return {
+      ok: true,
+      result: await agentGenerator(options)
+    };
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      errorMessage: error instanceof Error ? error.message : String(error)
+    };
   }
-}
-function summarizeGenerationFailure(tests, baseUrl, errorMessage) {
-  const results = tests.map((test) => ({
-    testId: test.testId,
-    type: test.type,
-    name: test.name,
-    status: "Failed",
-    errorMessage,
-    durationMs: null
-  }));
-  return {
-    kind: "playwright",
-    baseUrl,
-    total: results.length,
-    passed: 0,
-    failed: results.length,
-    tests: results
-  };
 }
 
 // src/action.ts

@@ -42,7 +42,13 @@ test("runCi completes the API run with executed test results", async () => {
         baseUrl: "https://preview.example.test",
         mode: "Advisory",
         userAgent: "testmutant-cli/test",
-        agentGenerator: async () => {},
+        agentGenerator: async () => ({
+          testId: null,
+          name: null,
+          sourceLength: null,
+          attemptCount: 0,
+          validationSummary: null,
+        }),
         testExecutor: async (tests, options) => {
           assert.equal(tests.length, 1);
           assert.equal(options.baseUrl, "https://preview.example.test");
@@ -120,7 +126,13 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
             apiUrl: "https://api.example.test",
             mode: "Enforce",
             userAgent: "testmutant-cli/test",
-            agentGenerator: async () => {},
+            agentGenerator: async () => ({
+              testId: null,
+              name: null,
+              sourceLength: null,
+              attemptCount: 0,
+              validationSummary: null,
+            }),
             testExecutor: async () => buildSummary({ failed: 1 }),
           }),
         (error: unknown) =>
@@ -179,7 +191,13 @@ test("runCi reports runner errors to the API before returning", async () => {
         apiUrl: "https://api.example.test",
         mode: "Advisory",
         userAgent: "testmutant-cli/test",
-        agentGenerator: async () => {},
+        agentGenerator: async () => ({
+          testId: null,
+          name: null,
+          sourceLength: null,
+          attemptCount: 0,
+          validationSummary: null,
+        }),
         testExecutor: async () => {
           throw new Error("Playwright runtime is unavailable");
         },
@@ -199,6 +217,96 @@ test("runCi reports runner errors to the API before returning", async () => {
     completeBody.results?.tests?.[0]?.errorMessage,
     "Playwright runtime is unavailable",
   );
+});
+
+test("runCi generate mode returns agent validation summary without completing the run again", async () => {
+  const env = withCiEnv();
+  const fetchMock = new FetchQueue([
+    jsonResponse(
+      {
+        runId: "11111111-1111-1111-1111-111111111111",
+        organizationId: "22222222-2222-2222-2222-222222222222",
+        projectId: "33333333-3333-3333-3333-333333333333",
+        projectName: "Acme",
+        repositoryId: "44444444-4444-4444-4444-444444444444",
+        repositoryFullName: "TestMutant/cli",
+        status: "Running",
+        tests: [
+          {
+            testId: "55555555-5555-5555-5555-555555555555",
+            type: "playwright",
+            name: "stale suite test",
+            source: "test source",
+          },
+        ],
+      },
+      201,
+    ),
+  ]);
+
+  try {
+    await fetchMock.run(async () => {
+      const result = await runCi({
+        apiKey: "test-key",
+        apiUrl: "https://api.example.test",
+        baseUrl: "https://preview.example.test",
+        mode: "Generate",
+        userAgent: "testmutant-cli/test",
+        agentGenerator: async (options) => {
+          assert.equal(options.baseUrl, "https://preview.example.test");
+          return {
+            testId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            name: "Generated requirement test",
+            sourceLength: 321,
+            attemptCount: 2,
+            validationSummary: {
+              kind: "playwright",
+              baseUrl: "https://preview.example.test",
+              total: 1,
+              passed: 1,
+              failed: 0,
+              tests: [
+                {
+                  testId: "generated-draft",
+                  type: "playwright",
+                  name: "Generated requirement test",
+                  status: "Passed",
+                  errorMessage: null,
+                  durationMs: 18,
+                },
+              ],
+            },
+          };
+        },
+        testExecutor: async () => {
+          throw new Error("generate mode should not run created tests");
+        },
+      });
+
+      assert.deepEqual(result, {
+        runId: "11111111-1111-1111-1111-111111111111",
+        status: "Passed",
+        totalTests: 1,
+        passedTests: 1,
+        failedTests: 0,
+        tests: [
+          {
+            testId: "generated-draft",
+            type: "playwright",
+            name: "Generated requirement test",
+            status: "Passed",
+            errorMessage: null,
+            durationMs: 18,
+          },
+        ],
+        baseUrl: "https://preview.example.test",
+      });
+    });
+  } finally {
+    env.restore();
+  }
+
+  assert.equal(fetchMock.calls.length, 1);
 });
 
 function buildSummary(options: { failed: number }): TestRunSummary {

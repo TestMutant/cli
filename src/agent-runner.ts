@@ -2,6 +2,8 @@ import { chromium, type Browser, type Page } from "playwright";
 import { CliError } from "./config";
 import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import WebSocket from "ws";
+import { runPlaywrightTests, type TestRunSummary } from "./playwright-runner";
+import type { CliRunTest } from "./api-client";
 
 const SUPPORTED_TOOLS = new Set([
   "browser_navigate",
@@ -9,6 +11,7 @@ const SUPPORTED_TOOLS = new Set([
   "browser_click",
   "browser_type",
   "browser_evaluate",
+  "playwright_validate_test",
 ]);
 
 export type AgentRunnerOptions = {
@@ -17,6 +20,7 @@ export type AgentRunnerOptions = {
   timeoutMs: number;
   userAgent: string;
   runId: string;
+  baseUrl?: string | null;
   browserDriver?: BrowserDriver;
   webSocketFactory?: WebSocketFactory;
 };
@@ -54,11 +58,21 @@ type AgentMessage =
       testId?: unknown;
       name?: unknown;
       sourceLength?: unknown;
+      attemptCount?: unknown;
+      validationSummary?: unknown;
     }
   | {
       type: "error";
       message?: unknown;
     };
+
+export type AgentGenerationResult = {
+  testId: string | null;
+  name: string | null;
+  sourceLength: number | null;
+  attemptCount: number;
+  validationSummary: TestRunSummary | null;
+};
 
 export function buildAgentWebSocketUrl(apiUrl: string, runId: string): string {
   const url = new URL(
@@ -79,11 +93,12 @@ export function buildAgentWebSocketUrl(apiUrl: string, runId: string): string {
 
 export async function runAgentGeneration(
   options: AgentRunnerOptions,
-): Promise<void> {
-  const browserDriver = options.browserDriver ?? (await createDirectPlaywrightDriver());
+): Promise<AgentGenerationResult> {
+  const browserDriver =
+    options.browserDriver ?? (await createDirectPlaywrightDriver(options.baseUrl ?? null));
 
   try {
-    await runAgentWebSocketLoop(options, browserDriver);
+    return await runAgentWebSocketLoop(options, browserDriver);
   } finally {
     await browserDriver.close();
   }
@@ -92,7 +107,7 @@ export async function runAgentGeneration(
 async function runAgentWebSocketLoop(
   options: AgentRunnerOptions,
   browserDriver: BrowserDriver,
-): Promise<void> {
+): Promise<AgentGenerationResult> {
   const webSocketFactory = options.webSocketFactory ?? createDefaultWebSocket;
   const socket = webSocketFactory(buildAgentWebSocketUrl(options.apiUrl, options.runId), {
     handshakeTimeout: options.timeoutMs,
@@ -105,6 +120,7 @@ async function runAgentWebSocketLoop(
   let settled = false;
   let activeToolCalls = 0;
   let closeAfterToolCalls = false;
+  let generationResult: AgentGenerationResult | null = null;
 
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -162,6 +178,15 @@ async function runAgentWebSocketLoop(
       const message = parseAgentMessage(data);
 
       if (message.type === "agent_complete") {
+        generationResult = {
+          testId: typeof message.testId === "string" ? message.testId : null,
+          name: typeof message.name === "string" ? message.name : null,
+          sourceLength:
+            typeof message.sourceLength === "number" ? message.sourceLength : null,
+          attemptCount:
+            typeof message.attemptCount === "number" ? message.attemptCount : 0,
+          validationSummary: parseValidationSummary(message.validationSummary),
+        };
         finish();
         return;
       }
@@ -183,6 +208,16 @@ async function runAgentWebSocketLoop(
       }
     }
   });
+
+  return (
+    generationResult ?? {
+      testId: null,
+      name: null,
+      sourceLength: null,
+      attemptCount: 0,
+      validationSummary: null,
+    }
+  );
 }
 
 async function handleToolCall(
@@ -233,7 +268,9 @@ async function handleToolCall(
   }
 }
 
-async function createDirectPlaywrightDriver(): Promise<BrowserDriver> {
+async function createDirectPlaywrightDriver(
+  baseUrl: string | null,
+): Promise<BrowserDriver> {
   await ensurePlaywrightBrowserInstalled();
 
   const browser = await chromium.launch({ headless: true });
@@ -265,12 +302,41 @@ async function createDirectPlaywrightDriver(): Promise<BrowserDriver> {
         }
 
         case "browser_evaluate": {
-          const script = getRequiredString(args, "script");
-          const result = await page.evaluate(script);
+          const expression = getRequiredString(args, "expression");
+          const result = await page.evaluate(expression);
           return {
             url: page.url(),
             title: await page.title(),
             result,
+          };
+        }
+
+        case "playwright_validate_test": {
+          const draftName = getRequiredString(args, "name");
+          const source = getRequiredString(args, "source");
+          const summary = await runPlaywrightTests(
+            [
+              {
+                testId: "generated-draft",
+                type: "playwright",
+                name: draftName,
+                source,
+              } satisfies CliRunTest,
+            ],
+            { baseUrl },
+          );
+          return {
+            passed: summary.failed === 0 && summary.total > 0,
+            kind: summary.kind,
+            summary: {
+              total: summary.total,
+              passed: summary.passed,
+              failed: summary.failed,
+              baseUrl: summary.baseUrl,
+            },
+            tests: summary.tests,
+            failureExcerpt:
+              summary.tests.find((test) => test.status === "Failed")?.errorMessage ?? null,
           };
         }
 
@@ -351,6 +417,49 @@ function parseAgentMessage(data: unknown): AgentMessage {
   }
 
   throw new CliError("TestMutant agent sent an unsupported message.");
+}
+
+function parseValidationSummary(value: unknown): TestRunSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const summary = value as {
+    kind?: unknown;
+    baseUrl?: unknown;
+    total?: unknown;
+    passed?: unknown;
+    failed?: unknown;
+    tests?: unknown;
+  };
+
+  if (
+    typeof summary.kind !== "string" ||
+    typeof summary.total !== "number" ||
+    typeof summary.passed !== "number" ||
+    typeof summary.failed !== "number" ||
+    !Array.isArray(summary.tests)
+  ) {
+    return null;
+  }
+
+  return {
+    kind: "playwright",
+    baseUrl: typeof summary.baseUrl === "string" ? summary.baseUrl : null,
+    total: summary.total,
+    passed: summary.passed,
+    failed: summary.failed,
+    tests: summary.tests
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      .map((item) => ({
+        testId: typeof item.testId === "string" ? item.testId : "",
+        type: typeof item.type === "string" ? item.type : "",
+        name: typeof item.name === "string" ? item.name : "",
+        status: item.status === "Passed" ? "Passed" : "Failed",
+        errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
+        durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
+      })),
+  };
 }
 
 function normalizeArguments(value: unknown): Record<string, unknown> {
