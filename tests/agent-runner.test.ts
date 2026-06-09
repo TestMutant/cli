@@ -36,7 +36,13 @@ test("runAgentGeneration sends runner_ready immediately after connect", async ()
   assert.deepEqual(harness.sentMessages(), [{ type: "runner_ready" }]);
 
   harness.socket.emitMessage({ type: "agent_complete" });
-  await run;
+  assert.deepEqual(await run, {
+    testId: null,
+    name: null,
+    sourceLength: null,
+    attemptCount: 0,
+    validationSummary: null,
+  });
 });
 
 test("runAgentGeneration returns matching tool_result for a tool_call", async () => {
@@ -115,6 +121,128 @@ test("runAgentGeneration sends failed tool_result when local execution fails", a
 
   harness.socket.emitMessage({ type: "agent_complete" });
   await run;
+});
+
+test("runAgentGeneration executes playwright_validate_test locally", async () => {
+  const harness = createHarness({
+    browserDriver: {
+      async callTool(name, args) {
+        assert.equal(name, "playwright_validate_test");
+        assert.equal(args.name, "Generated requirement test");
+        return {
+          passed: true,
+          kind: "playwright",
+          summary: {
+            total: 1,
+            passed: 1,
+            failed: 0,
+            baseUrl: "https://preview.example.test",
+          },
+          tests: [
+            {
+              testId: "generated-draft",
+              type: "playwright",
+              name: "Generated requirement test",
+              status: "Passed",
+              errorMessage: null,
+              durationMs: 15,
+            },
+          ],
+          failureExcerpt: null,
+        };
+      },
+      async close() {},
+    },
+  });
+  const run = runAgentGeneration(harness.options());
+
+  harness.socket.emitOpen();
+  harness.socket.emitMessage({
+    type: "tool_call",
+    id: "call_validate",
+    name: "playwright_validate_test",
+    arguments: {
+      name: "Generated requirement test",
+      source: "test source",
+    },
+  });
+
+  await waitFor(() => harness.sentMessages().length === 2);
+  assert.deepEqual(harness.sentMessages()[1], {
+    type: "tool_result",
+    id: "call_validate",
+    ok: true,
+    observation: {
+      passed: true,
+      kind: "playwright",
+      summary: {
+        total: 1,
+        passed: 1,
+        failed: 0,
+        baseUrl: "https://preview.example.test",
+      },
+      tests: [
+        {
+          testId: "generated-draft",
+          type: "playwright",
+          name: "Generated requirement test",
+          status: "Passed",
+          errorMessage: null,
+          durationMs: 15,
+        },
+      ],
+      failureExcerpt: null,
+    },
+  });
+
+  harness.socket.emitMessage({
+    type: "agent_complete",
+    testId: "11111111-1111-1111-1111-111111111111",
+    name: "Generated requirement test",
+    sourceLength: 123,
+    attemptCount: 2,
+    validationSummary: {
+      kind: "playwright",
+      baseUrl: "https://preview.example.test",
+      total: 1,
+      passed: 1,
+      failed: 0,
+      tests: [
+        {
+          testId: "generated-draft",
+          type: "playwright",
+          name: "Generated requirement test",
+          status: "Passed",
+          errorMessage: null,
+          durationMs: 15,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(await run, {
+    testId: "11111111-1111-1111-1111-111111111111",
+    name: "Generated requirement test",
+    sourceLength: 123,
+    attemptCount: 2,
+    validationSummary: {
+      kind: "playwright",
+      baseUrl: "https://preview.example.test",
+      total: 1,
+      passed: 1,
+      failed: 0,
+      tests: [
+        {
+          testId: "generated-draft",
+          type: "playwright",
+          name: "Generated requirement test",
+          status: "Passed",
+          errorMessage: null,
+          durationMs: 15,
+        },
+      ],
+    },
+  });
 });
 
 test("runAgentGeneration treats MCP error observations as failed tool results", async () => {
