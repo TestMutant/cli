@@ -93,9 +93,13 @@ test("runCi completes the API run with executed test results", async () => {
     status?: string;
     summary?: string;
     errorMessage?: string | null;
+    results?: Array<{ implementationId: string; passed: boolean; durationMs: number | null }>;
   };
   assert.equal(completeBody.status, "Passed");
   assert.ok(completeBody.summary?.includes("1 passed"));
+  assert.equal(completeBody.results?.length, 1);
+  assert.equal(completeBody.results?.[0]?.implementationId, "55555555-5555-5555-5555-555555555555");
+  assert.equal(completeBody.results?.[0]?.passed, true);
 });
 
 test("runCi completes failed results before enforcing nonzero failure", async () => {
@@ -155,9 +159,13 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
   const completeBody = JSON.parse(fetchMock.calls[1]?.init.body ?? "{}") as {
     status?: string;
     errorMessage?: string;
+    results?: Array<{ implementationId: string; passed: boolean; errorMessage: string | null }>;
   };
   assert.equal(completeBody.status, "Failed");
   assert.equal(completeBody.errorMessage, "1 Playwright test failed.");
+  assert.equal(completeBody.results?.length, 1);
+  assert.equal(completeBody.results?.[0]?.passed, false);
+  assert.equal(completeBody.results?.[0]?.errorMessage, "Expected heading to be visible");
 });
 
 test("runCi reports runner errors to the API before returning", async () => {

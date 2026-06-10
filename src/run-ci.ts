@@ -153,6 +153,13 @@ if (shouldGenerate) {
         ? "CI metadata captured. No implementations were returned for this run."
         : `Executed ${testSummary.total} Playwright test${testSummary.total === 1 ? "" : "s"}: ${testSummary.passed} passed, ${testSummary.failed} failed.`,
     errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`,
+    results: testSummary.tests.map((t) => ({
+      implementationId: t.implementationId,
+      passed: t.status === "Passed",
+      durationMs: t.durationMs,
+      errorMessage: t.errorMessage,
+      stackTrace: null,
+    })),
   });
 
   if (!passed && isExecutionKind(createRunRequest.runKind)) {
