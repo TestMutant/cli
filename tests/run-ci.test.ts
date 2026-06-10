@@ -34,7 +34,7 @@ test("runCi completes the API run with executed test results", async () => {
     jsonResponse({
       ok: true,
       runId: "11111111-1111-1111-1111-111111111111",
-      status: "Passed",
+      status: 2, // RunStatus.Completed
     }),
   ]);
 
@@ -119,7 +119,7 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
     jsonResponse({
       ok: true,
       runId: "11111111-1111-1111-1111-111111111111",
-      status: "Failed",
+      status: 3, // RunStatus.Failed
     }),
   ]);
 
@@ -190,7 +190,7 @@ test("runCi reports runner errors to the API before returning", async () => {
     jsonResponse({
       ok: true,
       runId: "11111111-1111-1111-1111-111111111111",
-      status: "Failed",
+      status: 3, // RunStatus.Failed
     }),
   ]);
 
@@ -240,7 +240,7 @@ test("runCi generation kind returns agent validation summary without completing 
         repositoryId: "44444444-4444-4444-4444-444444444444",
         repositoryFullName: "TestMutant/cli",
         runKind: 1,
-        status: "Running",
+        status: 1, // RunStatus.Running
         testSpecId: "77777777-7777-7777-7777-777777777777",
         implementations: [
           {
@@ -320,11 +320,75 @@ test("runCi generation kind returns agent validation summary without completing 
     env.restore();
   }
 
+  // Only the createRun call — the server agent already completed the run.
   assert.equal(fetchMock.calls.length, 1);
   const createBody = JSON.parse(fetchMock.calls[0]?.init.body ?? "{}") as {
     testSpecId?: string;
   };
   assert.equal(createBody.testSpecId, "77777777-7777-7777-7777-777777777777");
+});
+
+test("runCi generation failure calls completeRun as a safety net", async () => {
+  const env = withCiEnv();
+  const fetchMock = new FetchQueue([
+    jsonResponse(
+      {
+        runId: "11111111-1111-1111-1111-111111111111",
+        organizationId: "22222222-2222-2222-2222-222222222222",
+        projectId: "33333333-3333-3333-3333-333333333333",
+        projectName: "Acme",
+        repositoryId: "44444444-4444-4444-4444-444444444444",
+        repositoryFullName: "TestMutant/cli",
+        runKind: 1,
+        status: 1, // RunStatus.Running
+        testSpecId: "77777777-7777-7777-7777-777777777777",
+        implementations: [],
+      },
+      201,
+    ),
+    jsonResponse({
+      ok: true,
+      runId: "11111111-1111-1111-1111-111111111111",
+      status: 3, // RunStatus.Failed
+    }),
+  ]);
+
+  try {
+    await fetchMock.run(async () => {
+      const result = await runCi({
+        apiKey: "test-key",
+        apiUrl: "https://api.example.test",
+        runKind: "Generation",
+        testSpecId: "77777777-7777-7777-7777-777777777777",
+        userAgent: "testmutant-cli/test",
+        agentGenerator: async () => {
+          throw new Error("WebSocket connection refused");
+        },
+        testExecutor: async () => {
+          throw new Error("generation kind should not run tests");
+        },
+      });
+
+      assert.equal(result.status, "Failed");
+      assert.equal(result.totalTests, 0);
+    });
+  } finally {
+    env.restore();
+  }
+
+  // createRun + completeRun (safety net for failures)
+  assert.equal(fetchMock.calls.length, 2);
+  assert.equal(
+    fetchMock.calls[1]?.url,
+    "https://api.example.test/api/cli/v1/runs/11111111-1111-1111-1111-111111111111/complete",
+  );
+  const completeBody = JSON.parse(fetchMock.calls[1]?.init.body ?? "{}") as {
+    status?: string;
+    summary?: string;
+    errorMessage?: string;
+  };
+  assert.equal(completeBody.status, "Failed");
+  assert.ok(completeBody.summary?.includes("WebSocket connection refused"));
 });
 
 function buildSummary(options: { failed: number }): TestRunSummary {
