@@ -92,6 +92,16 @@ export interface components {
             status: null | string;
             summary: null | string;
             errorMessage: null | string;
+            results?: null | components["schemas"]["CliTestResult"][];
+        };
+        CliTestResult: {
+            /** Format: uuid */
+            implementationId: string;
+            passed: boolean;
+            /** Format: int32 */
+            durationMs?: null | number;
+            errorMessage?: null | string;
+            stackTrace?: null | string;
         };
         CliCompleteRunResponse: {
             ok: boolean;
