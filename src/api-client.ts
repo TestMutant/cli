@@ -7,7 +7,7 @@ export type CliPingRequest = components["schemas"]["CliPingRequest"];
 export type CliCreateRunRequest = components["schemas"]["CliCreateRunRequest"];
 export type CliCompleteRunRequest =
   components["schemas"]["CliCompleteRunRequest"];
-export type CliRunTest = components["schemas"]["CliRunTest"];
+export type CliRunImplementation = components["schemas"]["CliRunImplementation"];
 export type CliRunCreatedResponse =
   operations["CliV1_CreateRun"]["responses"][201]["content"]["application/json"];
 export type CliCompleteRunResponse =

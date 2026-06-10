@@ -37,7 +37,7 @@ test("runAgentGeneration sends runner_ready immediately after connect", async ()
 
   harness.socket.emitMessage({ type: "agent_complete" });
   assert.deepEqual(await run, {
-    testId: null,
+    testImplementationId: null,
     name: null,
     sourceLength: null,
     attemptCount: 0,
@@ -140,8 +140,8 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
           },
           tests: [
             {
-              testId: "generated-draft",
-              type: "playwright",
+              implementationId: "generated-draft",
+              runnerKind: "playwright",
               name: "Generated requirement test",
               status: "Passed",
               errorMessage: null,
@@ -183,8 +183,8 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
       },
       tests: [
         {
-          testId: "generated-draft",
-          type: "playwright",
+          implementationId: "generated-draft",
+          runnerKind: "playwright",
           name: "Generated requirement test",
           status: "Passed",
           errorMessage: null,
@@ -197,7 +197,7 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
 
   harness.socket.emitMessage({
     type: "agent_complete",
-    testId: "11111111-1111-1111-1111-111111111111",
+    testImplementationId: "11111111-1111-1111-1111-111111111111",
     name: "Generated requirement test",
     sourceLength: 123,
     attemptCount: 2,
@@ -209,8 +209,8 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
       failed: 0,
       tests: [
         {
-          testId: "generated-draft",
-          type: "playwright",
+          implementationId: "generated-draft",
+          runnerKind: "playwright",
           name: "Generated requirement test",
           status: "Passed",
           errorMessage: null,
@@ -221,7 +221,7 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
   });
 
   assert.deepEqual(await run, {
-    testId: "11111111-1111-1111-1111-111111111111",
+    testImplementationId: "11111111-1111-1111-1111-111111111111",
     name: "Generated requirement test",
     sourceLength: 123,
     attemptCount: 2,
@@ -233,8 +233,8 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
       failed: 0,
       tests: [
         {
-          testId: "generated-draft",
-          type: "playwright",
+          implementationId: "generated-draft",
+          runnerKind: "playwright",
           name: "Generated requirement test",
           status: "Passed",
           errorMessage: null,

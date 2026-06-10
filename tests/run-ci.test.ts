@@ -15,11 +15,15 @@ test("runCi completes the API run with executed test results", async () => {
         projectName: "Acme",
         repositoryId: "44444444-4444-4444-4444-444444444444",
         repositoryFullName: "TestMutant/cli",
+        runKind: 0,
         status: "Running",
-        tests: [
+        testSpecId: null,
+        implementations: [
           {
-            testId: "55555555-5555-5555-5555-555555555555",
-            type: "playwright",
+            implementationId: "55555555-5555-5555-5555-555555555555",
+            testSpecId: "66666666-6666-6666-6666-666666666666",
+            testLayer: "EndToEnd",
+            runnerKind: "playwright",
             name: "loads home",
             source: "test source",
           },
@@ -40,10 +44,10 @@ test("runCi completes the API run with executed test results", async () => {
         apiKey: "test-key",
         apiUrl: "https://api.example.test",
         baseUrl: "https://preview.example.test",
-        mode: "Advisory",
+        runKind: "Advisory",
         userAgent: "testmutant-cli/test",
         agentGenerator: async () => ({
-          testId: null,
+          testImplementationId: null,
           name: null,
           sourceLength: null,
           attemptCount: 0,
@@ -64,8 +68,8 @@ test("runCi completes the API run with executed test results", async () => {
         failedTests: 0,
         tests: [
           {
-            testId: "55555555-5555-5555-5555-555555555555",
-            type: "playwright",
+            implementationId: "55555555-5555-5555-5555-555555555555",
+            runnerKind: "playwright",
             name: "loads home",
             status: "Passed",
             errorMessage: null,
@@ -87,11 +91,11 @@ test("runCi completes the API run with executed test results", async () => {
 
   const completeBody = JSON.parse(fetchMock.calls[1]?.init.body ?? "{}") as {
     status?: string;
-    results?: { failed?: number; repositoryFullName?: string };
+    summary?: string;
+    errorMessage?: string | null;
   };
   assert.equal(completeBody.status, "Passed");
-  assert.equal(completeBody.results?.failed, 0);
-  assert.equal(completeBody.results?.repositoryFullName, "TestMutant/cli");
+  assert.ok(completeBody.summary?.includes("1 passed"));
 });
 
 test("runCi completes failed results before enforcing nonzero failure", async () => {
@@ -105,8 +109,10 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
         projectName: "Acme",
         repositoryId: "44444444-4444-4444-4444-444444444444",
         repositoryFullName: "TestMutant/cli",
+        runKind: 0,
         status: "Running",
-        tests: [],
+        testSpecId: null,
+        implementations: [],
       },
       201,
     ),
@@ -124,10 +130,10 @@ test("runCi completes failed results before enforcing nonzero failure", async ()
           runCi({
             apiKey: "test-key",
             apiUrl: "https://api.example.test",
-            mode: "Enforce",
+            runKind: "Execution",
             userAgent: "testmutant-cli/test",
             agentGenerator: async () => ({
-              testId: null,
+              testImplementationId: null,
               name: null,
               sourceLength: null,
               attemptCount: 0,
@@ -165,11 +171,15 @@ test("runCi reports runner errors to the API before returning", async () => {
         projectName: "Acme",
         repositoryId: "44444444-4444-4444-4444-444444444444",
         repositoryFullName: "TestMutant/cli",
+        runKind: 0,
         status: "Running",
-        tests: [
+        testSpecId: null,
+        implementations: [
           {
-            testId: "55555555-5555-5555-5555-555555555555",
-            type: "playwright",
+            implementationId: "55555555-5555-5555-5555-555555555555",
+            testSpecId: "66666666-6666-6666-6666-666666666666",
+            testLayer: "EndToEnd",
+            runnerKind: "playwright",
             name: "loads home",
             source: "test source",
           },
@@ -189,10 +199,10 @@ test("runCi reports runner errors to the API before returning", async () => {
       const result = await runCi({
         apiKey: "test-key",
         apiUrl: "https://api.example.test",
-        mode: "Advisory",
+        runKind: "Advisory",
         userAgent: "testmutant-cli/test",
         agentGenerator: async () => ({
-          testId: null,
+          testImplementationId: null,
           name: null,
           sourceLength: null,
           attemptCount: 0,
@@ -211,15 +221,14 @@ test("runCi reports runner errors to the API before returning", async () => {
   }
 
   const completeBody = JSON.parse(fetchMock.calls[1]?.init.body ?? "{}") as {
-    results?: { tests?: Array<{ errorMessage?: string }> };
+    status?: string;
+    errorMessage?: string | null;
   };
-  assert.equal(
-    completeBody.results?.tests?.[0]?.errorMessage,
-    "Playwright runtime is unavailable",
-  );
+  assert.equal(completeBody.status, "Failed");
+  assert.equal(completeBody.errorMessage, "1 Playwright test failed.");
 });
 
-test("runCi generate mode returns agent validation summary without completing the run again", async () => {
+test("runCi generation kind returns agent validation summary without completing the run again", async () => {
   const env = withCiEnv();
   const fetchMock = new FetchQueue([
     jsonResponse(
@@ -230,11 +239,15 @@ test("runCi generate mode returns agent validation summary without completing th
         projectName: "Acme",
         repositoryId: "44444444-4444-4444-4444-444444444444",
         repositoryFullName: "TestMutant/cli",
+        runKind: 1,
         status: "Running",
-        tests: [
+        testSpecId: "77777777-7777-7777-7777-777777777777",
+        implementations: [
           {
-            testId: "55555555-5555-5555-5555-555555555555",
-            type: "playwright",
+            implementationId: "55555555-5555-5555-5555-555555555555",
+            testSpecId: "77777777-7777-7777-7777-777777777777",
+            testLayer: "EndToEnd",
+            runnerKind: "playwright",
             name: "stale suite test",
             source: "test source",
           },
@@ -250,14 +263,13 @@ test("runCi generate mode returns agent validation summary without completing th
         apiKey: "test-key",
         apiUrl: "https://api.example.test",
         baseUrl: "https://preview.example.test",
-        mode: "Generate",
-        requirementId: "66666666-6666-6666-6666-666666666666",
-        plannedTestId: "77777777-7777-7777-7777-777777777777",
+        runKind: "Generation",
+        testSpecId: "77777777-7777-7777-7777-777777777777",
         userAgent: "testmutant-cli/test",
         agentGenerator: async (options) => {
           assert.equal(options.baseUrl, "https://preview.example.test");
           return {
-            testId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            testImplementationId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             name: "Generated requirement test",
             sourceLength: 321,
             attemptCount: 2,
@@ -269,8 +281,8 @@ test("runCi generate mode returns agent validation summary without completing th
               failed: 0,
               tests: [
                 {
-                  testId: "generated-draft",
-                  type: "playwright",
+                  implementationId: "generated-draft",
+                  runnerKind: "playwright",
                   name: "Generated requirement test",
                   status: "Passed",
                   errorMessage: null,
@@ -281,7 +293,7 @@ test("runCi generate mode returns agent validation summary without completing th
           };
         },
         testExecutor: async () => {
-          throw new Error("generate mode should not run created tests");
+          throw new Error("generation kind should not run created implementations");
         },
       });
 
@@ -293,8 +305,8 @@ test("runCi generate mode returns agent validation summary without completing th
         failedTests: 0,
         tests: [
           {
-            testId: "generated-draft",
-            type: "playwright",
+            implementationId: "generated-draft",
+            runnerKind: "playwright",
             name: "Generated requirement test",
             status: "Passed",
             errorMessage: null,
@@ -310,11 +322,9 @@ test("runCi generate mode returns agent validation summary without completing th
 
   assert.equal(fetchMock.calls.length, 1);
   const createBody = JSON.parse(fetchMock.calls[0]?.init.body ?? "{}") as {
-    requirementId?: string;
-    plannedTestId?: string;
+    testSpecId?: string;
   };
-  assert.equal(createBody.requirementId, "66666666-6666-6666-6666-666666666666");
-  assert.equal(createBody.plannedTestId, "77777777-7777-7777-7777-777777777777");
+  assert.equal(createBody.testSpecId, "77777777-7777-7777-7777-777777777777");
 });
 
 function buildSummary(options: { failed: number }): TestRunSummary {
@@ -329,8 +339,8 @@ function buildSummary(options: { failed: number }): TestRunSummary {
     failed,
     tests: [
       {
-        testId: "55555555-5555-5555-5555-555555555555",
-        type: "playwright",
+        implementationId: "55555555-5555-5555-5555-555555555555",
+        runnerKind: "playwright",
         name: "loads home",
         status: failed === 0 ? "Passed" : "Failed",
         errorMessage: failed === 0 ? null : "Expected heading to be visible",

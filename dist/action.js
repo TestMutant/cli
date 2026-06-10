@@ -132,11 +132,11 @@ async function runPlaywrightTests(tests, options = {}) {
   const supported = tests.filter(isPlaywrightTest);
   const unsupported = tests.filter((test) => !isPlaywrightTest(test));
   const unsupportedResults = unsupported.map((test) => ({
-    testId: test.testId,
-    type: test.type,
+    implementationId: test.implementationId,
+    runnerKind: test.runnerKind,
     name: test.name,
     status: "Failed",
-    errorMessage: `Unsupported test type: ${test.type}`,
+    errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
     durationMs: null
   }));
   if (supported.length === 0) {
@@ -172,7 +172,7 @@ async function runPlaywrightTests(tests, options = {}) {
   }
 }
 function isPlaywrightTest(test) {
-  return test.type.trim().toLowerCase() === PLAYWRIGHT_TYPE;
+  return test.runnerKind.trim().toLowerCase() === PLAYWRIGHT_TYPE;
 }
 async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   await (0, import_promises.writeFile)(
@@ -193,7 +193,7 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   for (let index = 0; index < tests.length; index += 1) {
     const test = tests[index];
     const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
-      test.testId
+      test.implementationId
     )}.spec.ts`;
     const filePath = (0, import_node_path2.join)(workDir, fileName);
     await (0, import_promises.writeFile)(filePath, test.source, "utf8");
@@ -216,8 +216,8 @@ function mapPlaywrightResults(writtenTests, commandResult) {
       return mapped;
     }
     return {
-      testId: test.testId,
-      type: test.type,
+      implementationId: test.implementationId,
+      runnerKind: test.runnerKind,
       name: test.name,
       status: commandResult.exitCode === 0 ? "Passed" : "Failed",
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
@@ -236,8 +236,8 @@ function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
       (caseResult) => caseResult.status && caseResult.status !== "passed"
     );
     fileResults.set(fileName, {
-      testId: writtenTest.test.testId,
-      type: writtenTest.test.type,
+      implementationId: writtenTest.test.implementationId,
+      runnerKind: writtenTest.test.runnerKind,
       name: writtenTest.test.name,
       status: failedSpec || failedCase ? "Failed" : "Passed",
       errorMessage: failedSpec || failedCase ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
@@ -490,7 +490,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       const message = parseAgentMessage(data);
       if (message.type === "agent_complete") {
         generationResult = {
-          testId: typeof message.testId === "string" ? message.testId : null,
+          testImplementationId: typeof message.testImplementationId === "string" ? message.testImplementationId : null,
           name: typeof message.name === "string" ? message.name : null,
           sourceLength: typeof message.sourceLength === "number" ? message.sourceLength : null,
           attemptCount: typeof message.attemptCount === "number" ? message.attemptCount : 0,
@@ -515,7 +515,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
     }
   });
   return generationResult ?? {
-    testId: null,
+    testImplementationId: null,
     name: null,
     sourceLength: null,
     attemptCount: 0,
@@ -602,8 +602,10 @@ async function createDirectPlaywrightDriver(baseUrl) {
           const summary = await runPlaywrightTests(
             [
               {
-                testId: "generated-draft",
-                type: "playwright",
+                implementationId: "generated-draft",
+                testSpecId: "generated-draft",
+                testLayer: "EndToEnd",
+                runnerKind: "playwright",
                 name: draftName,
                 source
               }
@@ -693,8 +695,8 @@ function parseValidationSummary(value) {
     passed: summary.passed,
     failed: summary.failed,
     tests: summary.tests.filter((item) => Boolean(item && typeof item === "object")).map((item) => ({
-      testId: typeof item.testId === "string" ? item.testId : "",
-      type: typeof item.type === "string" ? item.type : "",
+      implementationId: typeof item.implementationId === "string" ? item.implementationId : "",
+      runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : "",
       name: typeof item.name === "string" ? item.name : "",
       status: item.status === "Passed" ? "Passed" : "Failed",
       errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
@@ -895,10 +897,8 @@ function buildCreateRunRequest(options = {}) {
       2
     );
   }
-  const requirementId = normalize(options.requirementId);
-  const plannedTestId = normalize(options.plannedTestId);
+  const testSpecId = normalize(options.testSpecId);
   return {
-    mode: normalize(options.mode) ?? "Advisory",
     runKind: normalize(options.runKind) ?? "Advisory",
     repositoryProvider: repositoryProvider ?? "GitHub",
     repositoryFullName,
@@ -909,8 +909,7 @@ function buildCreateRunRequest(options = {}) {
     pullRequestNumber: detectPullRequestNumber(env),
     ciProvider: detectCiProvider(env),
     ciRunId: detectCiRunId(env),
-    ...requirementId ? { requirementId } : {},
-    ...plannedTestId ? { plannedTestId } : {}
+    ...testSpecId ? { testSpecId } : {}
   };
 }
 function detectRepositoryProvider(env) {
@@ -1107,17 +1106,16 @@ async function runCi(options) {
     userAgent: options.userAgent
   });
   const createRunRequest = buildCreateRunRequest({
-    mode: options.mode,
+    runKind: options.runKind,
     repositoryProvider: options.provider,
     repositoryFullName: options.repository,
     baseUrl: options.baseUrl,
     environmentName: options.environmentName,
-    requirementId: options.requirementId,
-    plannedTestId: options.plannedTestId
+    testSpecId: options.testSpecId
   });
   const created = await client.createRun(createRunRequest);
-  const runTests = created.tests ?? [];
-  const shouldGenerate = isGenerateMode(createRunRequest.mode);
+  const runImplementations = created.implementations ?? [];
+  const shouldGenerate = isGenerationKind(createRunRequest.runKind);
   if (shouldGenerate) {
     const agentGenerator = options.agentGenerator ?? await getDefaultAgentGenerator();
     const generationResult = await executeAgentGenerationForApiCompletion(
@@ -1132,7 +1130,7 @@ async function runCi(options) {
       }
     );
     if (!generationResult.ok) {
-      if (isEnforceMode(createRunRequest.mode)) {
+      if (isExecutionKind(createRunRequest.runKind)) {
         throw new CliError(
           `TestMutant test generation failed: ${generationResult.errorMessage}`,
           1
@@ -1162,26 +1160,16 @@ async function runCi(options) {
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const testSummary = await executeTestsForApiCompletion(
     testExecutor,
-    runTests,
+    runImplementations,
     createRunRequest.baseUrl
   );
   const passed = testSummary.failed === 0;
   const completed = await client.completeRun(created.runId, {
     status: passed ? "Passed" : "Failed",
-    summary: testSummary.total === 0 ? "CI metadata captured. No tests were returned for this run." : `Executed ${testSummary.total} Playwright test${testSummary.total === 1 ? "" : "s"}: ${testSummary.passed} passed, ${testSummary.failed} failed.`,
-    results: {
-      ...testSummary,
-      repositoryFullName: createRunRequest.repositoryFullName,
-      branch: createRunRequest.branch,
-      commitSha: createRunRequest.commitSha,
-      ciProvider: createRunRequest.ciProvider,
-      ciRunId: createRunRequest.ciRunId,
-      generatedAtUtc: (/* @__PURE__ */ new Date()).toISOString()
-    },
-    resultJson: null,
+    summary: testSummary.total === 0 ? "CI metadata captured. No implementations were returned for this run." : `Executed ${testSummary.total} Playwright test${testSummary.total === 1 ? "" : "s"}: ${testSummary.passed} passed, ${testSummary.failed} failed.`,
     errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`
   });
-  if (!passed && isEnforceMode(createRunRequest.mode)) {
+  if (!passed && isExecutionKind(createRunRequest.runKind)) {
     throw new CliError(
       `TestMutant run failed: ${testSummary.failed} of ${testSummary.total} Playwright tests failed.`,
       1
@@ -1189,7 +1177,7 @@ async function runCi(options) {
   }
   return {
     runId: completed.runId,
-    status: completed.status,
+    status: String(completed.status),
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,
@@ -1208,32 +1196,31 @@ function applyOptionEnvironmentOverrides(options) {
     process.env[API_URL_ENV_VAR] = DEFAULT_API_URL;
   }
 }
-function isGenerateMode(mode) {
-  const normalized = mode?.trim().toLowerCase();
-  return normalized === "generate" || normalized === "author";
+function isGenerationKind(runKind) {
+  return runKind?.trim().toLowerCase() === "generation";
 }
 async function getDefaultAgentGenerator() {
   const module2 = await Promise.resolve().then(() => (init_agent_runner(), agent_runner_exports));
   return module2.runAgentGeneration;
 }
-function isEnforceMode(mode) {
-  return mode?.trim().toLowerCase() === "enforce";
+function isExecutionKind(runKind) {
+  return runKind?.trim().toLowerCase() === "execution";
 }
-async function executeTestsForApiCompletion(testExecutor, tests, baseUrl) {
+async function executeTestsForApiCompletion(testExecutor, implementations, baseUrl) {
   try {
-    return await testExecutor(tests, { baseUrl });
+    return await testExecutor(implementations, { baseUrl });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "playwright",
       baseUrl,
-      total: tests.length,
+      total: implementations.length,
       passed: 0,
-      failed: tests.length,
-      tests: tests.map((test) => ({
-        testId: test.testId,
-        type: test.type,
-        name: test.name,
+      failed: implementations.length,
+      tests: implementations.map((impl) => ({
+        implementationId: impl.implementationId,
+        runnerKind: impl.runnerKind,
+        name: impl.name,
         status: "Failed",
         errorMessage: message,
         durationMs: null
@@ -1272,13 +1259,12 @@ async function main() {
   const result = await runCi({
     apiKey: process.env.TESTMUTANT_API_KEY,
     apiUrl: getInput("api_url"),
-    mode: getInput("mode") ?? "Advisory",
+    runKind: getInput("run_kind") ?? "Advisory",
     repository: getInput("repository"),
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
     environmentName: getInput("environment_name"),
-    requirementId: getInput("requirement_id"),
-    plannedTestId: getInput("planned_test_id"),
+    testSpecId: getInput("test_spec_id"),
     userAgent: `testmutant-action/${packageInfo.version}`
   });
   console.log("TestMutant run completed.");

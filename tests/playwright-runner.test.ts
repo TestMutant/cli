@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { runPlaywrightTests } from "../src/playwright-runner";
-import type { CliRunTest } from "../src/api-client";
+import type { CliRunImplementation } from "../src/api-client";
 
 test("runPlaywrightTests maps Playwright JSON results by generated file", async () => {
   const cliTest = buildTest("11111111-1111-1111-1111-111111111111", "loads home");
@@ -62,8 +62,8 @@ test("runPlaywrightTests maps Playwright JSON results by generated file", async 
     failed: 0,
     tests: [
       {
-        testId: cliTest.testId,
-        type: "playwright",
+        implementationId: cliTest.implementationId,
+        runnerKind: "playwright",
         name: "loads home",
         status: "Passed",
         errorMessage: null,
@@ -77,11 +77,13 @@ test("runPlaywrightTests reports failures and unsupported test types", async () 
   const passing = buildTest("11111111-1111-1111-1111-111111111111", "passes");
   const failing = buildTest("22222222-2222-2222-2222-222222222222", "fails");
   const unsupported = {
-    testId: "33333333-3333-3333-3333-333333333333",
-    type: "manual",
+    implementationId: "33333333-3333-3333-3333-333333333333",
+    testSpecId: "33333333-3333-3333-3333-333333333333",
+    testLayer: "EndToEnd",
+    runnerKind: "manual",
     name: "manual check",
     source: "",
-  } satisfies CliRunTest;
+  } satisfies CliRunImplementation;
 
   const summary = await runPlaywrightTests([passing, failing, unsupported], {
     commandRunner: async (_command, args) => {
@@ -99,12 +101,12 @@ test("runPlaywrightTests reports failures and unsupported test types", async () 
             file: filePath,
             specs: [
               {
-                ok: !filePath.includes(failing.testId),
+                ok: !filePath.includes(failing.implementationId),
                 tests: [
                   {
-                    ok: !filePath.includes(failing.testId),
+                    ok: !filePath.includes(failing.implementationId),
                     results: [
-                      filePath.includes(failing.testId)
+                      filePath.includes(failing.implementationId)
                         ? {
                             status: "failed",
                             duration: 45,
@@ -128,13 +130,15 @@ test("runPlaywrightTests reports failures and unsupported test types", async () 
   assert.equal(summary.failed, 2);
   assert.equal(summary.tests[1]?.status, "Failed");
   assert.equal(summary.tests[1]?.errorMessage, "Expected heading to be visible");
-  assert.equal(summary.tests[2]?.errorMessage, "Unsupported test type: manual");
+  assert.equal(summary.tests[2]?.errorMessage, "Unsupported runner kind: manual");
 });
 
-function buildTest(testId: string, name: string): CliRunTest {
+function buildTest(implementationId: string, name: string): CliRunImplementation {
   return {
-    testId,
-    type: "playwright",
+    implementationId,
+    testSpecId: implementationId,
+    testLayer: "EndToEnd",
+    runnerKind: "playwright",
     name,
     source: `import { test, expect } from "@playwright/test";\n\ntest(${JSON.stringify(
       name,
