@@ -98,6 +98,15 @@ if (shouldGenerate) {
     );
 
     if (!generationResult.ok) {
+      // The API agent handler may have already marked the run as Failed,
+      // but if the WebSocket connection failed before the agent started,
+      // the run could still be in Running. Complete it as a safety net.
+      await client.completeRun(created.runId, {
+        status: "Failed",
+        summary: `Test generation failed: ${generationResult.errorMessage}`,
+        errorMessage: generationResult.errorMessage,
+      }).catch(() => {});
+
       if (isExecutionKind(createRunRequest.runKind)) {
         throw new CliError(
           `TestMutant test generation failed: ${generationResult.errorMessage}`,
@@ -116,6 +125,7 @@ if (shouldGenerate) {
       };
     }
 
+    // On success the server agent already completed the run — no completeRun call needed.
     const validationSummary = generationResult.result.validationSummary;
     return {
       runId: created.runId,
@@ -154,7 +164,7 @@ if (shouldGenerate) {
 
   return {
     runId: completed.runId,
-    status: String(completed.status),
+    status: passed ? "Passed" : "Failed",
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,

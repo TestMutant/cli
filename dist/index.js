@@ -1131,6 +1131,12 @@ async function runCi(options) {
       }
     );
     if (!generationResult.ok) {
+      await client.completeRun(created.runId, {
+        status: "Failed",
+        summary: `Test generation failed: ${generationResult.errorMessage}`,
+        errorMessage: generationResult.errorMessage
+      }).catch(() => {
+      });
       if (isExecutionKind(createRunRequest.runKind)) {
         throw new CliError(
           `TestMutant test generation failed: ${generationResult.errorMessage}`,
@@ -1178,7 +1184,7 @@ async function runCi(options) {
   }
   return {
     runId: completed.runId,
-    status: String(completed.status),
+    status: passed ? "Passed" : "Failed",
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,

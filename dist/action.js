@@ -1130,6 +1130,12 @@ async function runCi(options) {
       }
     );
     if (!generationResult.ok) {
+      await client.completeRun(created.runId, {
+        status: "Failed",
+        summary: `Test generation failed: ${generationResult.errorMessage}`,
+        errorMessage: generationResult.errorMessage
+      }).catch(() => {
+      });
       if (isExecutionKind(createRunRequest.runKind)) {
         throw new CliError(
           `TestMutant test generation failed: ${generationResult.errorMessage}`,
@@ -1177,7 +1183,7 @@ async function runCi(options) {
   }
   return {
     runId: completed.runId,
-    status: String(completed.status),
+    status: passed ? "Passed" : "Failed",
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,
@@ -1259,7 +1265,7 @@ async function main() {
   const result = await runCi({
     apiKey: process.env.TESTMUTANT_API_KEY,
     apiUrl: getInput("api_url"),
-    runKind: getInput("run_kind") ?? "Advisory",
+    runKind: getInput("run_kind") ?? mapLegacyMode(getInput("mode")) ?? "Advisory",
     repository: getInput("repository"),
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
@@ -1277,6 +1283,19 @@ async function main() {
 function getInput(name) {
   const value = process.env[`INPUT_${name.toUpperCase()}`];
   return value?.trim() ? value.trim() : void 0;
+}
+function mapLegacyMode(mode) {
+  if (!mode) return void 0;
+  switch (mode.toLowerCase()) {
+    case "advisory":
+      return "Advisory";
+    case "enforce":
+      return "Execution";
+    case "generate":
+      return "Generation";
+    default:
+      return mode;
+  }
 }
 function fail(message) {
   console.error(message);
