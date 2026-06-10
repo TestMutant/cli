@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const result = await runCi({
     apiKey: process.env.TESTMUTANT_API_KEY,
     apiUrl: getInput("api_url"),
-    runKind: getInput("run_kind") ?? mapLegacyMode(getInput("mode")) ?? "Advisory",
+    runKind: getInput("run_kind") ?? "Advisory",
     repository: getInput("repository"),
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
@@ -50,21 +50,6 @@ async function main(): Promise<void> {
 function getInput(name: string): string | undefined {
   const value = process.env[`INPUT_${name.toUpperCase()}`];
   return value?.trim() ? value.trim() : undefined;
-}
-
-/** Map legacy GH Actions `mode` input values to the current `runKind` vocabulary. */
-function mapLegacyMode(mode: string | undefined): string | undefined {
-  if (!mode) return undefined;
-  switch (mode.toLowerCase()) {
-    case "advisory":
-      return "Advisory";
-    case "enforce":
-      return "Execution";
-    case "generate":
-      return "Generation";
-    default:
-      return mode;
-  }
 }
 
 function fail(message: string): never {
