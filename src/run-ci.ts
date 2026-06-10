@@ -25,6 +25,8 @@ export type RunCiOptions = {
   provider?: string;
   baseUrl?: string;
   environmentName?: string;
+  requirementId?: string;
+  plannedTestId?: string;
 
   userAgent: string;
   agentGenerator?: RunCiAgentGenerator;
@@ -75,6 +77,8 @@ export async function runCi(options: RunCiOptions): Promise<RunCiResult> {
     repositoryFullName: options.repository,
     baseUrl: options.baseUrl,
     environmentName: options.environmentName,
+    requirementId: options.requirementId,
+    plannedTestId: options.plannedTestId,
   });
 
   const created = await client.createRun(createRunRequest);

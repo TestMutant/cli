@@ -896,6 +896,8 @@ function buildCreateRunRequest(options = {}) {
       2
     );
   }
+  const requirementId = normalize(options.requirementId);
+  const plannedTestId = normalize(options.plannedTestId);
   return {
     mode: normalize(options.mode) ?? "Advisory",
     runKind: normalize(options.runKind) ?? "Advisory",
@@ -907,7 +909,9 @@ function buildCreateRunRequest(options = {}) {
     commitSha: detectCommitSha(env) ?? git(["rev-parse", "HEAD"]),
     pullRequestNumber: detectPullRequestNumber(env),
     ciProvider: detectCiProvider(env),
-    ciRunId: detectCiRunId(env)
+    ciRunId: detectCiRunId(env),
+    ...requirementId ? { requirementId } : {},
+    ...plannedTestId ? { plannedTestId } : {}
   };
 }
 function detectRepositoryProvider(env) {
@@ -1108,7 +1112,9 @@ async function runCi(options) {
     repositoryProvider: options.provider,
     repositoryFullName: options.repository,
     baseUrl: options.baseUrl,
-    environmentName: options.environmentName
+    environmentName: options.environmentName,
+    requirementId: options.requirementId,
+    plannedTestId: options.plannedTestId
   });
   const created = await client.createRun(createRunRequest);
   const runTests = created.tests ?? [];
@@ -1282,7 +1288,7 @@ program.command("ping").description("Verify the CLI can authenticate with the Te
   console.log(`Organization: ${ping.organizationName} (${ping.organizationId})`);
   console.log(`CLI API version: ${ping.cliApiVersion}`);
 });
-program.command("ci").description("Create and complete a TestMutant CI run.").argument("[url]", "Application base URL.").option("--mode <mode>", "Run mode.", "Advisory").option("--repository <repository>", "Repository full name override, e.g. owner/repo.").option("--provider <provider>", "Repository provider.", "GitHub").option("--base-url <url>", "Application base URL.").option("--environment <name>", "Environment name.").action(
+program.command("ci").description("Create and complete a TestMutant CI run.").argument("[url]", "Application base URL.").option("--mode <mode>", "Run mode.", "Advisory").option("--repository <repository>", "Repository full name override, e.g. owner/repo.").option("--provider <provider>", "Repository provider.", "GitHub").option("--base-url <url>", "Application base URL.").option("--environment <name>", "Environment name.").option("--requirement-id <id>", "Requirement id for requirement-driven generation.").option("--planned-test-id <id>", "Planned test id for targeted Playwright generation.").action(
   async (url, commandOptions) => {
     const options = program.opts();
     const result = await runCi({
@@ -1294,6 +1300,8 @@ program.command("ci").description("Create and complete a TestMutant CI run.").ar
       provider: commandOptions.provider,
       baseUrl: url ?? commandOptions.baseUrl,
       environmentName: commandOptions.environment,
+      requirementId: commandOptions.requirementId,
+      plannedTestId: commandOptions.plannedTestId,
       userAgent: `testmutant-cli/${packageInfo.version}`
     });
     if (options.json) {

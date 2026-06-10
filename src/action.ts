@@ -35,6 +35,8 @@ async function main(): Promise<void> {
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
     environmentName: getInput("environment_name"),
+    requirementId: getInput("requirement_id"),
+    plannedTestId: getInput("planned_test_id"),
     userAgent: `testmutant-action/${packageInfo.version}`,
   });
 

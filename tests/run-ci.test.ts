@@ -251,6 +251,8 @@ test("runCi generate mode returns agent validation summary without completing th
         apiUrl: "https://api.example.test",
         baseUrl: "https://preview.example.test",
         mode: "Generate",
+        requirementId: "66666666-6666-6666-6666-666666666666",
+        plannedTestId: "77777777-7777-7777-7777-777777777777",
         userAgent: "testmutant-cli/test",
         agentGenerator: async (options) => {
           assert.equal(options.baseUrl, "https://preview.example.test");
@@ -307,6 +309,12 @@ test("runCi generate mode returns agent validation summary without completing th
   }
 
   assert.equal(fetchMock.calls.length, 1);
+  const createBody = JSON.parse(fetchMock.calls[0]?.init.body ?? "{}") as {
+    requirementId?: string;
+    plannedTestId?: string;
+  };
+  assert.equal(createBody.requirementId, "66666666-6666-6666-6666-666666666666");
+  assert.equal(createBody.plannedTestId, "77777777-7777-7777-7777-777777777777");
 });
 
 function buildSummary(options: { failed: number }): TestRunSummary {

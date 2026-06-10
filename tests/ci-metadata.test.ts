@@ -61,6 +61,27 @@ test("buildCreateRunRequest lets explicit repository options override CI env", (
   }
 });
 
+test("buildCreateRunRequest includes requirement and planned test ids when provided", () => {
+  const env = withEnv({
+    GITHUB_ACTIONS: "true",
+    GITHUB_REPOSITORY: "TestMutant/cli",
+    GITHUB_REF_NAME: "main",
+    GITHUB_SHA: "abc123",
+  });
+
+  try {
+    const request = buildCreateRunRequest({
+      requirementId: "11111111-1111-1111-1111-111111111111",
+      plannedTestId: "22222222-2222-2222-2222-222222222222",
+    });
+
+    assert.equal(request.requirementId, "11111111-1111-1111-1111-111111111111");
+    assert.equal(request.plannedTestId, "22222222-2222-2222-2222-222222222222");
+  } finally {
+    env.restore();
+  }
+});
+
 function withEnv(values: Record<string, string | undefined>): {
   restore: () => void;
 } {

@@ -116,6 +116,8 @@ export interface components {
             ciRunId: null | string;
             /** Format: uuid */
             requirementId?: null | string;
+            /** Format: uuid */
+            plannedTestId?: null | string;
         };
         CliPingRequest: {
             repositoryProvider: null | string;

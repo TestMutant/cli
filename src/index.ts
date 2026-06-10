@@ -83,6 +83,8 @@ program
   .option("--provider <provider>", "Repository provider.", "GitHub")
   .option("--base-url <url>", "Application base URL.")
   .option("--environment <name>", "Environment name.")
+  .option("--requirement-id <id>", "Requirement id for requirement-driven generation.")
+  .option("--planned-test-id <id>", "Planned test id for targeted Playwright generation.")
   .action(
     async (
       url: string | undefined,
@@ -92,6 +94,8 @@ program
       provider?: string;
       baseUrl?: string;
       environment?: string;
+      requirementId?: string;
+      plannedTestId?: string;
       },
     ) => {
       const options = program.opts<GlobalOptions>();
@@ -105,6 +109,8 @@ program
         provider: commandOptions.provider,
         baseUrl: url ?? commandOptions.baseUrl,
         environmentName: commandOptions.environment,
+        requirementId: commandOptions.requirementId,
+        plannedTestId: commandOptions.plannedTestId,
         userAgent: `testmutant-cli/${packageInfo.version}`,
       });
 

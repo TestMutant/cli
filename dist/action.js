@@ -895,6 +895,8 @@ function buildCreateRunRequest(options = {}) {
       2
     );
   }
+  const requirementId = normalize(options.requirementId);
+  const plannedTestId = normalize(options.plannedTestId);
   return {
     mode: normalize(options.mode) ?? "Advisory",
     runKind: normalize(options.runKind) ?? "Advisory",
@@ -906,7 +908,9 @@ function buildCreateRunRequest(options = {}) {
     commitSha: detectCommitSha(env) ?? git(["rev-parse", "HEAD"]),
     pullRequestNumber: detectPullRequestNumber(env),
     ciProvider: detectCiProvider(env),
-    ciRunId: detectCiRunId(env)
+    ciRunId: detectCiRunId(env),
+    ...requirementId ? { requirementId } : {},
+    ...plannedTestId ? { plannedTestId } : {}
   };
 }
 function detectRepositoryProvider(env) {
@@ -1107,7 +1111,9 @@ async function runCi(options) {
     repositoryProvider: options.provider,
     repositoryFullName: options.repository,
     baseUrl: options.baseUrl,
-    environmentName: options.environmentName
+    environmentName: options.environmentName,
+    requirementId: options.requirementId,
+    plannedTestId: options.plannedTestId
   });
   const created = await client.createRun(createRunRequest);
   const runTests = created.tests ?? [];
@@ -1271,6 +1277,8 @@ async function main() {
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
     environmentName: getInput("environment_name"),
+    requirementId: getInput("requirement_id"),
+    plannedTestId: getInput("planned_test_id"),
     userAgent: `testmutant-action/${packageInfo.version}`
   });
   console.log("TestMutant run completed.");
