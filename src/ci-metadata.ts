@@ -15,6 +15,8 @@ export type BuildCreateRunRequestOptions = {
   repositoryFullName?: string;
   baseUrl?: string;
   environmentName?: string;
+  requirementId?: string;
+  plannedTestId?: string;
 };
 
 export function buildCreateRunRequest(
@@ -42,6 +44,9 @@ export function buildCreateRunRequest(
     );
   }
 
+  const requirementId = normalize(options.requirementId);
+  const plannedTestId = normalize(options.plannedTestId);
+
   return {
     mode: normalize(options.mode) ?? "Advisory",
     runKind: normalize(options.runKind) ?? "Advisory",
@@ -54,6 +59,8 @@ export function buildCreateRunRequest(
     pullRequestNumber: detectPullRequestNumber(env),
     ciProvider: detectCiProvider(env),
     ciRunId: detectCiRunId(env),
+    ...(requirementId ? { requirementId } : {}),
+    ...(plannedTestId ? { plannedTestId } : {}),
   } satisfies CliCreateRunRequest;
 }
 
