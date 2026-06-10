@@ -9,14 +9,12 @@ type RepositoryMetadata = {
 };
 
 export type BuildCreateRunRequestOptions = {
-  mode?: string;
   runKind?: string;
   repositoryProvider?: string;
   repositoryFullName?: string;
   baseUrl?: string;
   environmentName?: string;
-  requirementId?: string;
-  plannedTestId?: string;
+  testSpecId?: string;
 };
 
 export function buildCreateRunRequest(
@@ -44,11 +42,9 @@ export function buildCreateRunRequest(
     );
   }
 
-  const requirementId = normalize(options.requirementId);
-  const plannedTestId = normalize(options.plannedTestId);
+  const testSpecId = normalize(options.testSpecId);
 
   return {
-    mode: normalize(options.mode) ?? "Advisory",
     runKind: normalize(options.runKind) ?? "Advisory",
     repositoryProvider: repositoryProvider ?? "GitHub",
     repositoryFullName,
@@ -59,8 +55,7 @@ export function buildCreateRunRequest(
     pullRequestNumber: detectPullRequestNumber(env),
     ciProvider: detectCiProvider(env),
     ciRunId: detectCiRunId(env),
-    ...(requirementId ? { requirementId } : {}),
-    ...(plannedTestId ? { plannedTestId } : {}),
+    ...(testSpecId ? { testSpecId } : {}),
   } satisfies CliCreateRunRequest;
 }
 

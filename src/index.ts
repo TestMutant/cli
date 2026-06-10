@@ -75,27 +75,25 @@ program
   });
 
 program
-  .command("ci")
-  .description("Create and complete a TestMutant CI run.")
+  .command("run")
+  .description("Execute test implementations and report results.")
   .argument("[url]", "Application base URL.")
-  .option("--mode <mode>", "Run mode.", "Advisory")
+  .option("--run-kind <kind>", "Run kind: Execution or Advisory.", "Execution")
   .option("--repository <repository>", "Repository full name override, e.g. owner/repo.")
   .option("--provider <provider>", "Repository provider.", "GitHub")
   .option("--base-url <url>", "Application base URL.")
   .option("--environment <name>", "Environment name.")
-  .option("--requirement-id <id>", "Requirement id for requirement-driven generation.")
-  .option("--planned-test-id <id>", "Planned test id for targeted Playwright generation.")
+  .option("--test-spec-id <id>", "Test spec id to scope the run.")
   .action(
     async (
       url: string | undefined,
       commandOptions: {
-      mode?: string;
+      runKind?: string;
       repository?: string;
       provider?: string;
       baseUrl?: string;
       environment?: string;
-      requirementId?: string;
-      plannedTestId?: string;
+      testSpecId?: string;
       },
     ) => {
       const options = program.opts<GlobalOptions>();
@@ -104,13 +102,60 @@ program
         apiKey: options.apiKey,
         apiUrl: options.apiUrl,
         timeout: options.timeout,
-        mode: commandOptions.mode,
+        runKind: commandOptions.runKind,
         repository: commandOptions.repository,
         provider: commandOptions.provider,
         baseUrl: url ?? commandOptions.baseUrl,
         environmentName: commandOptions.environment,
-        requirementId: commandOptions.requirementId,
-        plannedTestId: commandOptions.plannedTestId,
+        testSpecId: commandOptions.testSpecId,
+        userAgent: `testmutant-cli/${packageInfo.version}`,
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`Run ID: ${result.runId}`);
+      console.log(`Status: ${result.status}`);
+      console.log(
+        `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`,
+      );
+    },
+  );
+
+program
+  .command("generate")
+  .description("Generate test implementations via the TestMutant agent.")
+  .argument("[url]", "Application base URL.")
+  .option("--repository <repository>", "Repository full name override, e.g. owner/repo.")
+  .option("--provider <provider>", "Repository provider.", "GitHub")
+  .option("--base-url <url>", "Application base URL.")
+  .option("--environment <name>", "Environment name.")
+  .option("--test-spec-id <id>", "Test spec id for targeted generation.")
+  .action(
+    async (
+      url: string | undefined,
+      commandOptions: {
+      repository?: string;
+      provider?: string;
+      baseUrl?: string;
+      environment?: string;
+      testSpecId?: string;
+      },
+    ) => {
+      const options = program.opts<GlobalOptions>();
+
+      const result = await runCi({
+        apiKey: options.apiKey,
+        apiUrl: options.apiUrl,
+        timeout: options.timeout,
+        runKind: "Generation",
+        repository: commandOptions.repository,
+        provider: commandOptions.provider,
+        baseUrl: url ?? commandOptions.baseUrl,
+        environmentName: commandOptions.environment,
+        testSpecId: commandOptions.testSpecId,
         userAgent: `testmutant-cli/${packageInfo.version}`,
       });
 

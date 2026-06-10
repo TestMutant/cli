@@ -91,18 +91,15 @@ export interface components {
         CliCompleteRunRequest: {
             status: null | string;
             summary: null | string;
-            results: null | components["schemas"]["JsonElement"];
-            resultJson: null | string;
             errorMessage: null | string;
         };
         CliCompleteRunResponse: {
             ok: boolean;
             /** Format: uuid */
             runId: string;
-            status: string;
+            status: components["schemas"]["RunStatus"];
         };
         CliCreateRunRequest: {
-            mode: null | string;
             runKind: null | string;
             repositoryProvider: null | string;
             repositoryFullName: null | string;
@@ -115,9 +112,7 @@ export interface components {
             ciProvider: null | string;
             ciRunId: null | string;
             /** Format: uuid */
-            requirementId?: null | string;
-            /** Format: uuid */
-            plannedTestId?: null | string;
+            testSpecId?: null | string;
         };
         CliPingRequest: {
             repositoryProvider: null | string;
@@ -148,8 +143,11 @@ export interface components {
             /** Format: uuid */
             repositoryId: string;
             repositoryFullName: string;
-            status: string;
-            tests: components["schemas"]["CliRunTest"][];
+            runKind: components["schemas"]["RunKind"];
+            status: components["schemas"]["RunStatus"];
+            /** Format: uuid */
+            testSpecId: null | string;
+            implementations: components["schemas"]["CliRunImplementation"][];
         };
         CliRunDetailResponse: {
             /** Format: uuid */
@@ -166,9 +164,8 @@ export interface components {
             baseUrl: null | string;
             environmentName: null | string;
             source: string;
-            mode: string;
-            runKind: string;
-            status: string;
+            runKind: components["schemas"]["RunKind"];
+            status: components["schemas"]["RunStatus"];
             branch: null | string;
             commitSha: null | string;
             /** Format: int32 */
@@ -180,15 +177,17 @@ export interface components {
             /** Format: date-time */
             completedAtUtc: null | string;
             summary: null | string;
-            resultJson: null | string;
             errorMessage: null | string;
             /** Format: date-time */
             createdAtUtc: string;
         };
-        CliRunTest: {
+        CliRunImplementation: {
             /** Format: uuid */
-            testId: string;
-            type: string;
+            implementationId: string;
+            /** Format: uuid */
+            testSpecId: string;
+            testLayer: string;
+            runnerKind: string;
             name: string;
             source: string;
         };
@@ -203,7 +202,6 @@ export interface components {
                 [key: string]: string[];
             };
         };
-        JsonElement: unknown;
         ProblemDetails: {
             type?: null | string;
             title?: null | string;
@@ -212,6 +210,8 @@ export interface components {
             detail?: null | string;
             instance?: null | string;
         };
+        RunKind: number;
+        RunStatus: number;
     };
     responses: never;
     parameters: never;

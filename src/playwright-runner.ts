@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import { createRequire } from "node:module";
-import type { CliRunTest } from "./api-client";
+import type { CliRunImplementation } from "./api-client";
 
 export type TestRunStatus = "Passed" | "Failed";
 
 export type TestRunResult = {
-  testId: string;
-  type: string;
+  implementationId: string;
+  runnerKind: string;
   name: string;
   status: TestRunStatus;
   errorMessage: string | null;
@@ -50,7 +50,7 @@ export type PlaywrightCommandResult = {
 };
 
 type WrittenTest = {
-  test: CliRunTest;
+  test: CliRunImplementation;
   filePath: string;
   fileName: string;
 };
@@ -92,17 +92,17 @@ type PlaywrightError = {
 const PLAYWRIGHT_TYPE = "playwright";
 
 export async function runPlaywrightTests(
-  tests: CliRunTest[],
+  tests: CliRunImplementation[],
   options: PlaywrightExecutionOptions = {},
 ): Promise<TestRunSummary> {
   const supported = tests.filter(isPlaywrightTest);
   const unsupported = tests.filter((test) => !isPlaywrightTest(test));
   const unsupportedResults = unsupported.map<TestRunResult>((test) => ({
-    testId: test.testId,
-    type: test.type,
+    implementationId: test.implementationId,
+    runnerKind: test.runnerKind,
     name: test.name,
     status: "Failed",
-    errorMessage: `Unsupported test type: ${test.type}`,
+    errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
     durationMs: null,
   }));
 
@@ -145,13 +145,13 @@ export async function runPlaywrightTests(
   }
 }
 
-function isPlaywrightTest(test: CliRunTest): boolean {
-  return test.type.trim().toLowerCase() === PLAYWRIGHT_TYPE;
+function isPlaywrightTest(test: CliRunImplementation): boolean {
+  return test.runnerKind.trim().toLowerCase() === PLAYWRIGHT_TYPE;
 }
 
 async function writePlaywrightWorkspace(
   workDir: string,
-  tests: CliRunTest[],
+  tests: CliRunImplementation[],
   baseUrl: string | null,
 ): Promise<WrittenTest[]> {
   await writeFile(
@@ -173,7 +173,7 @@ async function writePlaywrightWorkspace(
   for (let index = 0; index < tests.length; index += 1) {
     const test = tests[index]!;
     const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
-      test.testId,
+      test.implementationId,
     )}.spec.ts`;
     const filePath = join(workDir, fileName);
     await writeFile(filePath, test.source, "utf8");
@@ -208,8 +208,8 @@ function mapPlaywrightResults(
     }
 
     return {
-      testId: test.testId,
-      type: test.type,
+      implementationId: test.implementationId,
+      runnerKind: test.runnerKind,
       name: test.name,
       status: commandResult.exitCode === 0 ? "Passed" : "Failed",
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
@@ -240,8 +240,8 @@ function collectSuiteResults(
     );
 
     fileResults.set(fileName, {
-      testId: writtenTest.test.testId,
-      type: writtenTest.test.type,
+      implementationId: writtenTest.test.implementationId,
+      runnerKind: writtenTest.test.runnerKind,
       name: writtenTest.test.name,
       status: failedSpec || failedCase ? "Failed" : "Passed",
       errorMessage:

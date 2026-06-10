@@ -3,7 +3,7 @@ import { CliError } from "./config";
 import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import WebSocket from "ws";
 import { runPlaywrightTests, type TestRunSummary } from "./playwright-runner";
-import type { CliRunTest } from "./api-client";
+import type { CliRunImplementation } from "./api-client";
 
 const SUPPORTED_TOOLS = new Set([
   "browser_navigate",
@@ -55,7 +55,7 @@ type AgentMessage =
   | ToolCallMessage
   | {
       type: "agent_complete";
-      testId?: unknown;
+      testImplementationId?: unknown;
       name?: unknown;
       sourceLength?: unknown;
       attemptCount?: unknown;
@@ -67,7 +67,7 @@ type AgentMessage =
     };
 
 export type AgentGenerationResult = {
-  testId: string | null;
+  testImplementationId: string | null;
   name: string | null;
   sourceLength: number | null;
   attemptCount: number;
@@ -179,7 +179,7 @@ async function runAgentWebSocketLoop(
 
       if (message.type === "agent_complete") {
         generationResult = {
-          testId: typeof message.testId === "string" ? message.testId : null,
+          testImplementationId: typeof message.testImplementationId === "string" ? message.testImplementationId : null,
           name: typeof message.name === "string" ? message.name : null,
           sourceLength:
             typeof message.sourceLength === "number" ? message.sourceLength : null,
@@ -211,7 +211,7 @@ async function runAgentWebSocketLoop(
 
   return (
     generationResult ?? {
-      testId: null,
+      testImplementationId: null,
       name: null,
       sourceLength: null,
       attemptCount: 0,
@@ -317,11 +317,13 @@ async function createDirectPlaywrightDriver(
           const summary = await runPlaywrightTests(
             [
               {
-                testId: "generated-draft",
-                type: "playwright",
+                implementationId: "generated-draft",
+                testSpecId: "generated-draft",
+                testLayer: "EndToEnd",
+                runnerKind: "playwright",
                 name: draftName,
                 source,
-              } satisfies CliRunTest,
+              } satisfies CliRunImplementation,
             ],
             { baseUrl },
           );
@@ -452,8 +454,8 @@ function parseValidationSummary(value: unknown): TestRunSummary | null {
     tests: summary.tests
       .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
       .map((item) => ({
-        testId: typeof item.testId === "string" ? item.testId : "",
-        type: typeof item.type === "string" ? item.type : "",
+        implementationId: typeof item.implementationId === "string" ? item.implementationId : "",
+        runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : "",
         name: typeof item.name === "string" ? item.name : "",
         status: item.status === "Passed" ? "Passed" : "Failed",
         errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,

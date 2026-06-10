@@ -30,13 +30,12 @@ async function main(): Promise<void> {
   const result = await runCi({
     apiKey: process.env.TESTMUTANT_API_KEY,
     apiUrl: getInput("api_url"),
-    mode: getInput("mode") ?? "Advisory",
+    runKind: getInput("run_kind") ?? "Advisory",
     repository: getInput("repository"),
     provider: getInput("provider") ?? "GitHub",
     baseUrl: getInput("base_url"),
     environmentName: getInput("environment_name"),
-    requirementId: getInput("requirement_id"),
-    plannedTestId: getInput("planned_test_id"),
+    testSpecId: getInput("test_spec_id"),
     userAgent: `testmutant-action/${packageInfo.version}`,
   });
 
