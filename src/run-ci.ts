@@ -162,6 +162,15 @@ if (shouldGenerate) {
     })),
   });
 
+  // Upload screenshots for failed tests (best-effort, after run completion).
+  for (const test of testSummary.tests) {
+    if (test.screenshotBuffer) {
+      await client
+        .uploadScreenshot(created.runId, test.implementationId, test.screenshotBuffer)
+        .catch(() => {});
+    }
+  }
+
   if (!passed && isExecutionKind(createRunRequest.runKind)) {
     throw new CliError(
       `TestMutant run failed: ${testSummary.failed} of ${testSummary.total} Playwright tests failed.`,

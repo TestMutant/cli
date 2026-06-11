@@ -138,7 +138,8 @@ async function runPlaywrightTests(tests, options = {}) {
     name: test.name,
     status: "Failed",
     errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
-    durationMs: null
+    durationMs: null,
+    screenshotBuffer: null
   }));
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
@@ -163,7 +164,7 @@ async function runPlaywrightTests(tests, options = {}) {
         }
       }
     );
-    const mappedResults = mapPlaywrightResults(writtenTests, result);
+    const mappedResults = await mapPlaywrightResults(writtenTests, result, workDir);
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
       ...unsupportedResults
@@ -184,7 +185,9 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
+      "    screenshot: 'only-on-failure',",
       "  },",
+      `  outputDir: './test-results',`,
       "};",
       ""
     ].join("\n"),
@@ -202,13 +205,13 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   }
   return writtenTests;
 }
-function mapPlaywrightResults(writtenTests, commandResult) {
+async function mapPlaywrightResults(writtenTests, commandResult, workDir) {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = /* @__PURE__ */ new Map();
   const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
   if (report) {
     for (const suite of report.suites ?? []) {
-      collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
+      await collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
     }
   }
   return writtenTests.map(({ test, fileName }) => {
@@ -222,11 +225,12 @@ function mapPlaywrightResults(writtenTests, commandResult) {
       name: test.name,
       status: commandResult.exitCode === 0 ? "Passed" : "Failed",
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
-      durationMs: null
+      durationMs: null,
+      screenshotBuffer: null
     };
   });
 }
-function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
+async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
   if (writtenTest && fileName) {
@@ -236,17 +240,36 @@ function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
     const result = failedCase?.results?.find(
       (caseResult) => caseResult.status && caseResult.status !== "passed"
     );
+    const isFailed = Boolean(failedSpec || failedCase);
+    let screenshotBuffer = null;
+    if (isFailed && result) {
+      screenshotBuffer = await readScreenshotAttachment(result);
+    }
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
       name: writtenTest.test.name,
-      status: failedSpec || failedCase ? "Failed" : "Passed",
-      errorMessage: failedSpec || failedCase ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
-      durationMs: sumDurations(specs)
+      status: isFailed ? "Failed" : "Passed",
+      errorMessage: isFailed ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
+      durationMs: sumDurations(specs),
+      screenshotBuffer
     });
   }
   for (const child of suite.suites ?? []) {
-    collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+    await collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+  }
+}
+async function readScreenshotAttachment(result) {
+  const attachment = result.attachments?.find(
+    (a) => a.name === "screenshot" && a.path
+  );
+  if (!attachment?.path) {
+    return null;
+  }
+  try {
+    return await (0, import_promises.readFile)(attachment.path);
+  } catch {
+    return null;
   }
 }
 function parsePlaywrightReport(stdout) {
@@ -792,6 +815,30 @@ var TestMutantApiClient = class {
       request
     );
   }
+  async uploadScreenshot(runId, implementationId, screenshot) {
+    const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
+    const formData = new FormData();
+    formData.append("file", new Blob([screenshot], { type: "image/png" }), "screenshot.png");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await fetch(new URL(path, this.options.apiUrl), {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+        headers: {
+          authorization: `Bearer ${this.options.apiKey}`,
+          "user-agent": this.options.userAgent
+        }
+      });
+      if (response.status !== 200) {
+        console.error(`Screenshot upload failed with HTTP ${response.status}`);
+      }
+    } catch {
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   async postJson(path, body, expectedStatus = 200) {
     const response = await this.request(path, body);
     if (response.status === 401) {
@@ -1183,6 +1230,12 @@ async function runCi(options) {
       stackTrace: null
     }))
   });
+  for (const test of testSummary.tests) {
+    if (test.screenshotBuffer) {
+      await client.uploadScreenshot(created.runId, test.implementationId, test.screenshotBuffer).catch(() => {
+      });
+    }
+  }
   if (!passed && isExecutionKind(createRunRequest.runKind)) {
     throw new CliError(
       `TestMutant run failed: ${testSummary.failed} of ${testSummary.total} Playwright tests failed.`,
