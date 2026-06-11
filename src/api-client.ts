@@ -55,7 +55,11 @@ export class TestMutantApiClient {
   ): Promise<void> {
     const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
     const formData = new FormData();
-    formData.append("file", new Blob([screenshot], { type: "image/png" }), "screenshot.png");
+    const bytes = screenshot.buffer.slice(
+      screenshot.byteOffset,
+      screenshot.byteOffset + screenshot.byteLength,
+    ) as ArrayBuffer;
+    formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
