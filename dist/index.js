@@ -724,7 +724,8 @@ function parseValidationSummary(value) {
       name: typeof item.name === "string" ? item.name : "",
       status: item.status === "Passed" ? "Passed" : "Failed",
       errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
-      durationMs: typeof item.durationMs === "number" ? item.durationMs : null
+      durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
+      screenshotBuffer: null
     }))
   };
 }
@@ -818,7 +819,11 @@ var TestMutantApiClient = class {
   async uploadScreenshot(runId, implementationId, screenshot) {
     const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
     const formData = new FormData();
-    formData.append("file", new Blob([screenshot], { type: "image/png" }), "screenshot.png");
+    const bytes = screenshot.buffer.slice(
+      screenshot.byteOffset,
+      screenshot.byteOffset + screenshot.byteLength
+    );
+    formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
@@ -1290,7 +1295,8 @@ async function executeTestsForApiCompletion(testExecutor, implementations, baseU
         name: impl.name,
         status: "Failed",
         errorMessage: message,
-        durationMs: null
+        durationMs: null,
+        screenshotBuffer: null
       }))
     };
   }

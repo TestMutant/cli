@@ -237,6 +237,7 @@ async function executeTestsForApiCompletion(
         status: "Failed",
         errorMessage: message,
         durationMs: null,
+        screenshotBuffer: null,
       })),
     };
   }

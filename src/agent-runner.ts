@@ -460,6 +460,7 @@ function parseValidationSummary(value: unknown): TestRunSummary | null {
         status: item.status === "Passed" ? "Passed" : "Failed",
         errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
         durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
+        screenshotBuffer: null,
       })),
   };
 }

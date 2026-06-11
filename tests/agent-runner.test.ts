@@ -239,6 +239,7 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
           status: "Passed",
           errorMessage: null,
           durationMs: 15,
+          screenshotBuffer: null,
         },
       ],
     },
