@@ -48,6 +48,39 @@ export class TestMutantApiClient {
     );
   }
 
+  async uploadScreenshot(
+    runId: string,
+    implementationId: string,
+    screenshot: Buffer,
+  ): Promise<void> {
+    const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
+    const formData = new FormData();
+    formData.append("file", new Blob([screenshot], { type: "image/png" }), "screenshot.png");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+
+    try {
+      const response = await fetch(new URL(path, this.options.apiUrl), {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+        headers: {
+          authorization: `Bearer ${this.options.apiKey}`,
+          "user-agent": this.options.userAgent,
+        },
+      });
+
+      if (response.status !== 200) {
+        console.error(`Screenshot upload failed with HTTP ${response.status}`);
+      }
+    } catch {
+      // Best-effort: screenshot upload failure should not fail the run.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private async postJson<TResponse, TRequest>(
     path: string,
     body: TRequest,

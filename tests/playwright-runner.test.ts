@@ -68,6 +68,7 @@ test("runPlaywrightTests maps Playwright JSON results by generated file", async 
         status: "Passed",
         errorMessage: null,
         durationMs: 123,
+        screenshotBuffer: null,
       },
     ],
   });
