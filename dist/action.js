@@ -153,16 +153,18 @@ async function runPlaywrightTests(tests, options = {}) {
       options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    await ensurePlaywrightBrowserInstalled();
+    const runtimeEnv = {
+      ...process.env,
+      NODE_PATH: buildNodePath(process.env.NODE_PATH)
+    };
+    await ensureBrowserInstalledForRun(commandRunner, workDir, runtimeEnv, options.signal);
     const result = await commandRunner(
       process.execPath,
       getPlaywrightTestArgs(workDir, writtenTests),
       {
         cwd: workDir,
-        env: {
-          ...process.env,
-          NODE_PATH: buildNodePath(process.env.NODE_PATH)
-        }
+        env: runtimeEnv,
+        signal: options.signal
       }
     );
     const mappedResults = await mapPlaywrightResults(
@@ -445,6 +447,28 @@ function buildNodePath(existing) {
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
 }
+function getPlaywrightInstallArgs() {
+  if (process.platform === "linux") {
+    return [getPlaywrightCliPath(), "install", "--with-deps", "chromium"];
+  }
+  return [getPlaywrightCliPath(), "install", "chromium"];
+}
+async function ensureBrowserInstalledForRun(commandRunner, workDir, env, signal) {
+  if (commandRunner === defaultCommandRunner) {
+    await ensurePlaywrightBrowserInstalled();
+    return;
+  }
+  const result = await commandRunner(process.execPath, getPlaywrightInstallArgs(), {
+    cwd: workDir,
+    env,
+    signal
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      meaningfulStderr(result.stderr) ?? firstNonEmpty(result.stdout) ?? "Failed to install Playwright Chromium browser."
+    );
+  }
+}
 function getPlaywrightTestArgs(workDir, writtenTests) {
   return [
     getPlaywrightCliPath(),
@@ -502,7 +526,7 @@ function delimiter() {
 }
 function defaultCommandRunner(command, args, options) {
   return new Promise((resolve) => {
-    (0, import_node_child_process3.execFile)(
+    const child = (0, import_node_child_process3.execFile)(
       command,
       args,
       {
@@ -519,6 +543,17 @@ function defaultCommandRunner(command, args, options) {
         });
       }
     );
+    const abort = () => {
+      child.kill();
+    };
+    if (options.signal?.aborted) {
+      abort();
+      return;
+    }
+    options.signal?.addEventListener("abort", abort, { once: true });
+    child.once("exit", () => {
+      options.signal?.removeEventListener("abort", abort);
+    });
   });
 }
 function safeFilePart(value) {

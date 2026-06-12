@@ -205,6 +205,14 @@ const hostedRunCommand = program
         1,
       );
     }
+
+    if (result.status === "Cancelled") {
+      throw new CliError("Hosted run was cancelled.", 1);
+    }
+
+    if (result.status === "TimedOut") {
+      throw new CliError("Hosted run timed out.", 124);
+    }
   });
 
 // Hide the hosted-run command from help output; it is invoked by the API server, not by users.
