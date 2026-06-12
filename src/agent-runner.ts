@@ -461,6 +461,8 @@ function parseValidationSummary(value: unknown): TestRunSummary | null {
         errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
         durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       })),
   };
 }

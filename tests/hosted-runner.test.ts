@@ -7,6 +7,7 @@ import {
 } from "../src/hosted-runner";
 import type { HostedRunnerConfig } from "../src/hosted-runner-config";
 import type {
+  HostedRunnerArtifactUploadRequest,
   HostedRunnerTestResultRequest,
   HostedRunnerCompleteRunResultRequest,
 } from "../src/api-client";
@@ -94,21 +95,39 @@ type ReportedCompletion = {
   request: HostedRunnerCompleteRunResultRequest;
 };
 
+type UploadedArtifact = {
+  projectId: string;
+  runId: string;
+  request: HostedRunnerArtifactUploadRequest;
+};
+
 function createMockReporter(): HostedRunnerResultReporter & {
   testResults: ReportedTestResult[];
   completions: ReportedCompletion[];
+  artifacts: UploadedArtifact[];
 } {
   const testResults: ReportedTestResult[] = [];
   const completions: ReportedCompletion[] = [];
+  const artifacts: UploadedArtifact[] = [];
+  let resultCounter = 0;
+  let artifactCounter = 0;
 
   return {
     testResults,
     completions,
+    artifacts,
     async reportTestResult(projectId, runId, implementationId, request) {
       testResults.push({ projectId, runId, implementationId, request });
+      resultCounter += 1;
+      return { resultId: `result-${resultCounter}` };
     },
     async completeRunResults(projectId, runId, request) {
       completions.push({ projectId, runId, request });
+    },
+    async uploadArtifact(projectId, runId, request) {
+      artifacts.push({ projectId, runId, request });
+      artifactCounter += 1;
+      return { artifactId: `artifact-${artifactCounter}` };
     },
   };
 }
@@ -138,6 +157,8 @@ test("runHostedRunner executes tests and reports passing results", async () => {
           errorMessage: null,
           durationMs: 250,
           screenshotBuffer: null,
+          traceBuffer: null,
+          videoBuffer: null,
         },
       ],
     };
@@ -154,6 +175,8 @@ test("runHostedRunner executes tests and reports passing results", async () => {
   assert.equal(result.failedTests, 0);
   assert.equal(result.runId, "cccc0000-cccc-cccc-cccc-cccccccccccc");
   assert.equal(result.projectId, "bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  assert.ok(result.durationMs >= 0);
+  assert.equal(result.artifactsUploaded, 0);
 
   // Verify per-test result was reported.
   assert.equal(reporter.testResults.length, 1);
@@ -168,6 +191,9 @@ test("runHostedRunner executes tests and reports passing results", async () => {
   assert.equal(reporter.completions[0]!.request.passedTests, 1);
   assert.equal(reporter.completions[0]!.request.failedTests, 0);
   assert.ok((reporter.completions[0]!.request.summary as string).includes("1 passed"));
+
+  // No artifacts uploaded for passing tests.
+  assert.equal(reporter.artifacts.length, 0);
 });
 
 test("runHostedRunner reports failure when tests fail", async () => {
@@ -189,6 +215,8 @@ test("runHostedRunner reports failure when tests fail", async () => {
         errorMessage: "Expected heading to be visible",
         durationMs: 500,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       },
     ],
   });
@@ -309,6 +337,8 @@ test("runHostedRunner uses environment baseUrl when project baseUrl is null", as
           errorMessage: null,
           durationMs: 100,
           screenshotBuffer: null,
+          traceBuffer: null,
+          videoBuffer: null,
         },
       ],
     };
@@ -344,6 +374,8 @@ test("runHostedRunner converts payload test definitions to CliRunImplementation 
           errorMessage: null,
           durationMs: 100,
           screenshotBuffer: null,
+          traceBuffer: null,
+          videoBuffer: null,
         },
       ],
     };
@@ -383,6 +415,9 @@ test("runHostedRunner per-test reporting failure does not prevent run completion
     async completeRunResults(projectId, runId, request) {
       completions.push({ projectId, runId, request });
     },
+    async uploadArtifact() {
+      return { artifactId: null };
+    },
   };
 
   const executor: HostedRunnerTestExecutor = async () => ({
@@ -400,6 +435,8 @@ test("runHostedRunner per-test reporting failure does not prevent run completion
         errorMessage: null,
         durationMs: 100,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       },
     ],
   });
@@ -434,6 +471,8 @@ test("runHostedRunner passes correct project and run IDs to reporter", async () 
         errorMessage: null,
         durationMs: 100,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       },
     ],
   });
@@ -447,4 +486,483 @@ test("runHostedRunner passes correct project and run IDs to reporter", async () 
   assert.equal(reporter.testResults[0]!.runId, "cccc0000-cccc-cccc-cccc-cccccccccccc");
   assert.equal(reporter.completions[0]!.projectId, "bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
   assert.equal(reporter.completions[0]!.runId, "cccc0000-cccc-cccc-cccc-cccccccccccc");
+});
+
+// ---------------------------------------------------------------------------
+// CLI-03: Hosted Validation Execution — per-test timeout enforcement
+// ---------------------------------------------------------------------------
+
+test("runHostedRunner passes per-test timeout to executor", async () => {
+  const config = buildConfig({
+    limits: {
+      runTimeoutSeconds: 900,
+      perTestTimeoutSeconds: 45,
+      maxTestsPerRun: 10,
+      maxArtifactSizeBytes: 10485760,
+      maxRepairAttempts: 1,
+    },
+  });
+  const reporter = createMockReporter();
+
+  let capturedOptions: unknown;
+  const executor: HostedRunnerTestExecutor = async (tests, options) => {
+    capturedOptions = options;
+    return {
+      kind: "playwright",
+      baseUrl: null,
+      total: 1,
+      passed: 1,
+      failed: 0,
+      tests: [
+        {
+          implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+          runnerKind: "playwright",
+          name: "login page loads",
+          status: "Passed",
+          errorMessage: null,
+          durationMs: 100,
+          screenshotBuffer: null,
+          traceBuffer: null,
+          videoBuffer: null,
+        },
+      ],
+    };
+  };
+
+  await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  const options = capturedOptions as {
+    baseUrl: string | null;
+    perTestTimeoutMs: number;
+    traceMode: string;
+    videoMode: string;
+  };
+
+  assert.equal(options.perTestTimeoutMs, 45_000);
+  assert.equal(options.traceMode, "retain-on-failure");
+  assert.equal(options.videoMode, "retain-on-failure");
+});
+
+// ---------------------------------------------------------------------------
+// CLI-03: Hosted Validation Execution — artifact upload for failed tests
+// ---------------------------------------------------------------------------
+
+test("runHostedRunner uploads screenshot artifact for failed test", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const screenshotData = Buffer.from("fake-screenshot-png");
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: screenshotData,
+        traceBuffer: null,
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 1);
+  assert.equal(reporter.artifacts.length, 1);
+
+  const artifact = reporter.artifacts[0]!;
+  assert.equal(artifact.projectId, "bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  assert.equal(artifact.runId, "cccc0000-cccc-cccc-cccc-cccccccccccc");
+  assert.equal(artifact.request.kind, 1); // Screenshot
+  assert.equal(artifact.request.contentType, "image/png");
+  assert.ok(artifact.request.fileName!.includes("screenshot.png"));
+  assert.equal(artifact.request.contentBase64, screenshotData.toString("base64"));
+  assert.equal(artifact.request.runImplementationResultId, "result-1");
+});
+
+test("runHostedRunner uploads trace artifact for failed test", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const traceData = Buffer.from("fake-trace-zip-data");
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: null,
+        traceBuffer: traceData,
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 1);
+  assert.equal(reporter.artifacts.length, 1);
+
+  const artifact = reporter.artifacts[0]!;
+  assert.equal(artifact.request.kind, 2); // Trace
+  assert.equal(artifact.request.contentType, "application/zip");
+  assert.ok(artifact.request.fileName!.includes("trace.zip"));
+  assert.equal(artifact.request.contentBase64, traceData.toString("base64"));
+});
+
+test("runHostedRunner uploads video artifact for failed test", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const videoData = Buffer.from("fake-video-webm-data");
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: videoData,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 1);
+  assert.equal(reporter.artifacts.length, 1);
+
+  const artifact = reporter.artifacts[0]!;
+  assert.equal(artifact.request.kind, 3); // Video
+  assert.equal(artifact.request.contentType, "video/webm");
+  assert.ok(artifact.request.fileName!.includes("video.webm"));
+  assert.equal(artifact.request.contentBase64, videoData.toString("base64"));
+});
+
+test("runHostedRunner uploads all artifact types for failed test", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const screenshotData = Buffer.from("screenshot");
+  const traceData = Buffer.from("trace");
+  const videoData = Buffer.from("video");
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: screenshotData,
+        traceBuffer: traceData,
+        videoBuffer: videoData,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 3);
+  assert.equal(reporter.artifacts.length, 3);
+
+  // All artifacts should reference the same resultId.
+  assert.equal(reporter.artifacts[0]!.request.runImplementationResultId, "result-1");
+  assert.equal(reporter.artifacts[1]!.request.runImplementationResultId, "result-1");
+  assert.equal(reporter.artifacts[2]!.request.runImplementationResultId, "result-1");
+
+  // Verify artifact kinds in order: screenshot, trace, video.
+  assert.equal(reporter.artifacts[0]!.request.kind, 1); // Screenshot
+  assert.equal(reporter.artifacts[1]!.request.kind, 2); // Trace
+  assert.equal(reporter.artifacts[2]!.request.kind, 3); // Video
+});
+
+test("runHostedRunner skips artifacts exceeding max size", async () => {
+  const config = buildConfig({
+    limits: {
+      runTimeoutSeconds: 900,
+      perTestTimeoutSeconds: 30,
+      maxTestsPerRun: 10,
+      maxArtifactSizeBytes: 10, // Very small limit
+      maxRepairAttempts: 1,
+    },
+  });
+  const reporter = createMockReporter();
+
+  const largeScreenshot = Buffer.alloc(20, "x"); // 20 bytes > 10 byte limit
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: largeScreenshot,
+        traceBuffer: null,
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 0);
+  assert.equal(reporter.artifacts.length, 0);
+});
+
+test("runHostedRunner artifact upload failure does not fail the run", async () => {
+  const config = buildConfig();
+  const completions: ReportedCompletion[] = [];
+
+  const reporter: HostedRunnerResultReporter = {
+    async reportTestResult() {
+      return { resultId: "result-1" };
+    },
+    async completeRunResults(projectId, runId, request) {
+      completions.push({ projectId, runId, request });
+    },
+    async uploadArtifact() {
+      throw new Error("Upload failed");
+    },
+  };
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Element not found",
+        durationMs: 500,
+        screenshotBuffer: Buffer.from("screenshot"),
+        traceBuffer: Buffer.from("trace"),
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  // Run should complete despite upload failures.
+  assert.equal(result.status, "Failed");
+  assert.equal(result.artifactsUploaded, 0);
+  assert.equal(completions.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// CLI-03: Run timing
+// ---------------------------------------------------------------------------
+
+test("runHostedRunner reports run timing in completion request", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 1,
+    failed: 0,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Passed",
+        errorMessage: null,
+        durationMs: 100,
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.ok(result.durationMs >= 0);
+
+  // Verify completion request includes timing.
+  const completion = reporter.completions[0]!.request;
+  assert.ok(completion.durationMs !== undefined);
+  assert.ok(typeof completion.durationMs === "number");
+  assert.ok(completion.startedAtUtc !== undefined);
+  assert.ok(completion.completedAtUtc !== undefined);
+});
+
+test("runHostedRunner does not upload artifacts for passing tests", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 1,
+    passed: 1,
+    failed: 0,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Passed",
+        errorMessage: null,
+        durationMs: 100,
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  // Passing tests should not have artifacts (screenshot/trace/video are only on failure).
+  assert.equal(reporter.artifacts.length, 0);
+});
+
+test("runHostedRunner uploads artifacts for multiple failed tests with correct result IDs", async () => {
+  const config = buildConfig();
+  config.payload.testSource.tests.push({
+    implementationId: "eeee0000-eeee-eeee-eeee-eeeeeeeeeeee",
+    testSpecId: "ffff0000-ffff-ffff-ffff-ffffffffffff",
+    requirementId: null,
+    specTitle: "Dashboard loads",
+    testLayer: "EndToEnd",
+    runnerKind: "playwright",
+    name: "dashboard loads",
+    description: null,
+    source: 'import { test } from "@playwright/test";\ntest("dashboard", async ({ page }) => {});',
+    targetPath: null,
+    status: 0,
+    lifecycleStatus: 0,
+    implementationSource: 0,
+  });
+
+  const reporter = createMockReporter();
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: null,
+    total: 2,
+    passed: 0,
+    failed: 2,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Login failed",
+        durationMs: 500,
+        screenshotBuffer: Buffer.from("login-screenshot"),
+        traceBuffer: null,
+        videoBuffer: null,
+      },
+      {
+        implementationId: "eeee0000-eeee-eeee-eeee-eeeeeeeeeeee",
+        runnerKind: "playwright",
+        name: "dashboard loads",
+        status: "Failed",
+        errorMessage: "Dashboard timeout",
+        durationMs: 600,
+        screenshotBuffer: Buffer.from("dashboard-screenshot"),
+        traceBuffer: Buffer.from("dashboard-trace"),
+        videoBuffer: null,
+      },
+    ],
+  });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.artifactsUploaded, 3); // 1 screenshot + 1 screenshot + 1 trace
+
+  // First test: 1 screenshot linked to result-1.
+  assert.equal(reporter.artifacts[0]!.request.runImplementationResultId, "result-1");
+  assert.equal(reporter.artifacts[0]!.request.kind, 1);
+
+  // Second test: 1 screenshot + 1 trace linked to result-2.
+  assert.equal(reporter.artifacts[1]!.request.runImplementationResultId, "result-2");
+  assert.equal(reporter.artifacts[1]!.request.kind, 1);
+  assert.equal(reporter.artifacts[2]!.request.runImplementationResultId, "result-2");
+  assert.equal(reporter.artifacts[2]!.request.kind, 2);
 });

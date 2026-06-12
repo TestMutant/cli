@@ -196,6 +196,8 @@ const hostedRunCommand = program
     console.log(
       `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`,
     );
+    console.log(`Duration: ${result.durationMs}ms`);
+    console.log(`Artifacts uploaded: ${result.artifactsUploaded}`);
 
     if (result.status === "Failed") {
       throw new CliError(

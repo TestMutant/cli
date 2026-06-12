@@ -16,6 +16,8 @@ export type TestRunResult = {
   errorMessage: string | null;
   durationMs: number | null;
   screenshotBuffer: Buffer | null;
+  traceBuffer: Buffer | null;
+  videoBuffer: Buffer | null;
 };
 
 export type TestRunSummary = {
@@ -29,6 +31,9 @@ export type TestRunSummary = {
 
 export type PlaywrightExecutionOptions = {
   baseUrl?: string | null;
+  perTestTimeoutMs?: number;
+  traceMode?: "off" | "retain-on-failure";
+  videoMode?: "off" | "retain-on-failure";
   cwd?: string;
   commandRunner?: PlaywrightCommandRunner;
 };
@@ -113,6 +118,8 @@ export async function runPlaywrightTests(
     errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
     durationMs: null,
     screenshotBuffer: null,
+    traceBuffer: null,
+    videoBuffer: null,
   }));
 
   if (supported.length === 0) {
@@ -125,7 +132,7 @@ export async function runPlaywrightTests(
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
       supported,
-      options.baseUrl ?? null,
+      options,
     );
 
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
@@ -161,17 +168,24 @@ function isPlaywrightTest(test: CliRunImplementation): boolean {
 async function writePlaywrightWorkspace(
   workDir: string,
   tests: CliRunImplementation[],
-  baseUrl: string | null,
+  options: PlaywrightExecutionOptions,
 ): Promise<WrittenTest[]> {
+  const baseUrl = options.baseUrl ?? null;
+  const perTestTimeoutMs = options.perTestTimeoutMs ?? 30_000;
+  const traceMode = options.traceMode ?? "off";
+  const videoMode = options.videoMode ?? "off";
+
   await writeFile(
     join(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
-      "  timeout: 30000,",
+      `  timeout: ${perTestTimeoutMs},`,
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
       "    screenshot: 'only-on-failure',",
+      `    trace: '${traceMode}',`,
+      `    video: '${videoMode}',`,
       "  },",
       `  outputDir: './test-results',`,
       "};",
@@ -227,6 +241,8 @@ async function mapPlaywrightResults(
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
       durationMs: null,
       screenshotBuffer: null,
+      traceBuffer: null,
+      videoBuffer: null,
     };
   });
 }
@@ -254,9 +270,13 @@ async function collectSuiteResults(
 
     const isFailed = Boolean(failedSpec || failedCase);
     let screenshotBuffer: Buffer | null = null;
+    let traceBuffer: Buffer | null = null;
+    let videoBuffer: Buffer | null = null;
 
     if (isFailed && result) {
       screenshotBuffer = await readScreenshotAttachment(result);
+      traceBuffer = await readAttachmentByName(result, "trace");
+      videoBuffer = await readAttachmentByName(result, "video");
     }
 
     fileResults.set(fileName, {
@@ -269,6 +289,8 @@ async function collectSuiteResults(
         : null,
       durationMs: sumDurations(specs),
       screenshotBuffer,
+      traceBuffer,
+      videoBuffer,
     });
   }
 
@@ -278,8 +300,12 @@ async function collectSuiteResults(
 }
 
 async function readScreenshotAttachment(result: PlaywrightCaseResult): Promise<Buffer | null> {
+  return readAttachmentByName(result, "screenshot");
+}
+
+async function readAttachmentByName(result: PlaywrightCaseResult, name: string): Promise<Buffer | null> {
   const attachment = result.attachments?.find(
-    (a) => a.name === "screenshot" && a.path,
+    (a) => a.name === name && a.path,
   );
 
   if (!attachment?.path) {

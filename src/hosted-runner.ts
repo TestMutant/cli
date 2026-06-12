@@ -2,12 +2,14 @@ import type { HostedRunnerConfig, HostedRunnerTestDefinition } from "./hosted-ru
 import {
   HostedRunnerApiClient,
   type CliRunImplementation,
+  type HostedRunnerArtifactUploadRequest,
   type HostedRunnerCompleteRunResultRequest,
   type HostedRunnerTestResultRequest,
 } from "./api-client";
 import {
   runPlaywrightTests,
   type PlaywrightExecutionOptions,
+  type TestRunResult,
   type TestRunSummary,
 } from "./playwright-runner";
 
@@ -28,6 +30,16 @@ const RunStatus = {
   TimedOut: 5,
 } as const;
 
+// TestArtifactKind enum values (from API contract).
+const ArtifactKind = {
+  Screenshot: 1,
+  Trace: 2,
+  Video: 3,
+  Log: 4,
+  Console: 5,
+  NetworkSummary: 6,
+} as const;
+
 export type HostedRunnerResult = {
   runId: string;
   projectId: string;
@@ -35,6 +47,8 @@ export type HostedRunnerResult = {
   totalTests: number;
   passedTests: number;
   failedTests: number;
+  durationMs: number;
+  artifactsUploaded: number;
 };
 
 export type HostedRunnerTestExecutor = (
@@ -48,12 +62,17 @@ export type HostedRunnerResultReporter = {
     runId: string,
     implementationId: string,
     request: HostedRunnerTestResultRequest,
-  ): Promise<void>;
+  ): Promise<{ resultId: string | null }>;
   completeRunResults(
     projectId: string,
     runId: string,
     request: HostedRunnerCompleteRunResultRequest,
   ): Promise<void>;
+  uploadArtifact(
+    projectId: string,
+    runId: string,
+    request: HostedRunnerArtifactUploadRequest,
+  ): Promise<{ artifactId: string | null }>;
 };
 
 export type HostedRunnerOptions = {
@@ -65,9 +84,9 @@ export type HostedRunnerOptions = {
  * Executes a hosted runner job using the API-provided configuration.
  *
  * 1. Converts payload test definitions to CliRunImplementation format.
- * 2. Executes tests via the Playwright runner.
- * 3. Reports per-test results to the API (best-effort).
- * 4. Completes the run with aggregate results.
+ * 2. Executes tests via the Playwright runner with workers=1 and per-test timeout.
+ * 3. Reports per-test results and uploads artifacts to the API (best-effort).
+ * 4. Completes the run with aggregate results including timing and artifact counts.
  */
 export async function runHostedRunner(
   config: HostedRunnerConfig,
@@ -82,24 +101,47 @@ export async function runHostedRunner(
     null;
 
   const perTestTimeoutMs = config.limits.perTestTimeoutSeconds * 1000;
+  const maxArtifactSizeBytes = config.limits.maxArtifactSizeBytes;
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const resultReporter = options.resultReporter ?? createDefaultResultReporter(config);
 
-  const testSummary = await executeTests(testExecutor, implementations, baseUrl, perTestTimeoutMs);
+  const startedAtUtc = new Date().toISOString();
+  const testSummary = await executeTests(testExecutor, implementations, {
+    baseUrl,
+    perTestTimeoutMs,
+    traceMode: "retain-on-failure",
+    videoMode: "retain-on-failure",
+  });
+  const completedAtUtc = new Date().toISOString();
+  const durationMs = new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
 
-  // Report per-test results back to the API (best-effort, don't fail the run on reporting errors).
+  // Report per-test results and upload artifacts (best-effort).
+  let artifactsUploaded = 0;
+
   for (const test of testSummary.tests) {
     const resultStatus =
       test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
 
-    await resultReporter
+    const { resultId } = await resultReporter
       .reportTestResult(config.projectId, config.runId, test.implementationId, {
         status: resultStatus,
         durationMs: test.durationMs,
         errorMessage: test.errorMessage,
         environmentUrl: baseUrl,
+        startedAtUtc,
+        completedAtUtc,
       })
-      .catch(() => {});
+      .catch(() => ({ resultId: null }));
+
+    // Upload artifacts for this test result (best-effort).
+    artifactsUploaded += await uploadTestArtifacts(
+      resultReporter,
+      config.projectId,
+      config.runId,
+      resultId,
+      test,
+      maxArtifactSizeBytes,
+    );
   }
 
   // Complete the run with aggregate results.
@@ -120,7 +162,10 @@ export async function runHostedRunner(
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,
+    durationMs,
     environmentUrl: baseUrl,
+    startedAtUtc,
+    completedAtUtc,
   });
 
   return {
@@ -130,6 +175,8 @@ export async function runHostedRunner(
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,
+    durationMs,
+    artifactsUploaded,
   };
 }
 
@@ -146,16 +193,22 @@ function toCliRunImplementation(
   };
 }
 
+type ExecutionOptions = {
+  baseUrl: string | null;
+  perTestTimeoutMs: number;
+  traceMode: "off" | "retain-on-failure";
+  videoMode: "off" | "retain-on-failure";
+};
+
 async function executeTests(
   testExecutor: HostedRunnerTestExecutor,
   implementations: CliRunImplementation[],
-  baseUrl: string | null,
-  _perTestTimeoutMs: number,
+  options: ExecutionOptions,
 ): Promise<TestRunSummary> {
   if (implementations.length === 0) {
     return {
       kind: "playwright",
-      baseUrl,
+      baseUrl: options.baseUrl,
       total: 0,
       passed: 0,
       failed: 0,
@@ -164,13 +217,18 @@ async function executeTests(
   }
 
   try {
-    return await testExecutor(implementations, { baseUrl });
+    return await testExecutor(implementations, {
+      baseUrl: options.baseUrl,
+      perTestTimeoutMs: options.perTestTimeoutMs,
+      traceMode: options.traceMode,
+      videoMode: options.videoMode,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
     return {
       kind: "playwright",
-      baseUrl,
+      baseUrl: options.baseUrl,
       total: implementations.length,
       passed: 0,
       failed: implementations.length,
@@ -182,9 +240,88 @@ async function executeTests(
         errorMessage: message,
         durationMs: null,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       })),
     };
   }
+}
+
+/**
+ * Uploads screenshot, trace, and video artifacts for a single test result.
+ * Each upload is best-effort; failures are silently ignored.
+ * Artifacts exceeding the max size limit are skipped.
+ * Returns the count of successfully uploaded artifacts.
+ */
+async function uploadTestArtifacts(
+  reporter: HostedRunnerResultReporter,
+  projectId: string,
+  runId: string,
+  resultId: string | null,
+  test: TestRunResult,
+  maxArtifactSizeBytes: number,
+): Promise<number> {
+  const artifacts: Array<{
+    kind: number;
+    fileName: string;
+    contentType: string;
+    buffer: Buffer;
+  }> = [];
+
+  if (test.screenshotBuffer) {
+    artifacts.push({
+      kind: ArtifactKind.Screenshot,
+      fileName: `${safeFilePart(test.implementationId)}-screenshot.png`,
+      contentType: "image/png",
+      buffer: test.screenshotBuffer,
+    });
+  }
+
+  if (test.traceBuffer) {
+    artifacts.push({
+      kind: ArtifactKind.Trace,
+      fileName: `${safeFilePart(test.implementationId)}-trace.zip`,
+      contentType: "application/zip",
+      buffer: test.traceBuffer,
+    });
+  }
+
+  if (test.videoBuffer) {
+    artifacts.push({
+      kind: ArtifactKind.Video,
+      fileName: `${safeFilePart(test.implementationId)}-video.webm`,
+      contentType: "video/webm",
+      buffer: test.videoBuffer,
+    });
+  }
+
+  let uploaded = 0;
+
+  for (const artifact of artifacts) {
+    if (artifact.buffer.byteLength > maxArtifactSizeBytes) {
+      continue;
+    }
+
+    const { artifactId } = await reporter
+      .uploadArtifact(projectId, runId, {
+        kind: artifact.kind,
+        fileName: artifact.fileName,
+        contentType: artifact.contentType,
+        contentBase64: artifact.buffer.toString("base64"),
+        runImplementationResultId: resultId,
+      })
+      .catch(() => ({ artifactId: null }));
+
+    if (artifactId) {
+      uploaded += 1;
+    }
+  }
+
+  return uploaded;
+}
+
+function safeFilePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
 }
 
 function createDefaultResultReporter(
@@ -198,10 +335,15 @@ function createDefaultResultReporter(
 
   return {
     async reportTestResult(projectId, runId, implementationId, request) {
-      await client.reportTestResult(projectId, runId, implementationId, request);
+      const response = await client.reportTestResult(projectId, runId, implementationId, request);
+      return { resultId: response.resultId };
     },
     async completeRunResults(projectId, runId, request) {
       await client.completeRunResults(projectId, runId, request);
+    },
+    async uploadArtifact(projectId, runId, request) {
+      const response = await client.uploadArtifact(projectId, runId, request);
+      return { artifactId: response.artifactId };
     },
   };
 }

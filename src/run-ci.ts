@@ -238,6 +238,8 @@ async function executeTestsForApiCompletion(
         errorMessage: message,
         durationMs: null,
         screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null,
       })),
     };
   }
