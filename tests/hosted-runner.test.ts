@@ -8,6 +8,7 @@ import {
 import type { HostedRunnerConfig } from "../src/hosted-runner-config";
 import type {
   HostedRunnerArtifactUploadRequest,
+  HostedRunnerHeartbeatResponse,
   HostedRunnerTestResultRequest,
   HostedRunnerCompleteRunResultRequest,
 } from "../src/api-client";
@@ -101,11 +102,33 @@ type UploadedArtifact = {
   request: HostedRunnerArtifactUploadRequest;
 };
 
-function createMockReporter(): HostedRunnerResultReporter & {
+function createHeartbeatResponse(
+  overrides: Partial<HostedRunnerHeartbeatResponse> = {},
+): HostedRunnerHeartbeatResponse {
+  return {
+    ok: true,
+    organizationId: "aaaa0000-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    projectId: "bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    runId: "cccc0000-cccc-cccc-cccc-cccccccccccc",
+    hostedRunnerJobId: "11111111-1111-1111-1111-111111111111",
+    lastHeartbeatAtUtc: new Date().toISOString(),
+    expiresAtUtc: new Date(Date.now() + 60_000).toISOString(),
+    ...overrides,
+  };
+}
+
+function createMockReporter(options: {
+  heartbeat?: (
+    projectId: string,
+    runId: string,
+  ) => Promise<HostedRunnerHeartbeatResponse>;
+} = {}): HostedRunnerResultReporter & {
+  heartbeats: Array<{ projectId: string; runId: string }>;
   testResults: ReportedTestResult[];
   completions: ReportedCompletion[];
   artifacts: UploadedArtifact[];
 } {
+  const heartbeats: Array<{ projectId: string; runId: string }> = [];
   const testResults: ReportedTestResult[] = [];
   const completions: ReportedCompletion[] = [];
   const artifacts: UploadedArtifact[] = [];
@@ -115,9 +138,16 @@ function createMockReporter(): HostedRunnerResultReporter & {
   let artifactCounter = 0;
 
   return {
+    heartbeats,
     testResults,
     completions,
     artifacts,
+    async heartbeat(projectId, runId) {
+      heartbeats.push({ projectId, runId });
+      return options.heartbeat
+        ? options.heartbeat(projectId, runId)
+        : createHeartbeatResponse({ projectId, runId });
+    },
     async reportTestResult(projectId, runId, implementationId, request) {
       testResults.push({ projectId, runId, implementationId, request });
 
@@ -194,6 +224,8 @@ test("runHostedRunner executes tests and reports passing results", async () => {
   assert.equal(result.artifactsUploaded, 0);
 
   // Verify per-test result was reported.
+  assert.equal(reporter.heartbeats.length, 1);
+  assert.equal(reporter.heartbeats[0]!.projectId, "bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
   assert.equal(reporter.testResults.length, 1);
   assert.equal(reporter.testResults[0]!.implementationId, "dddd0000-dddd-dddd-dddd-dddddddddddd");
   assert.equal(reporter.testResults[0]!.request.status, 0); // Passed
@@ -209,6 +241,86 @@ test("runHostedRunner executes tests and reports passing results", async () => {
 
   // No artifacts uploaded for passing tests.
   assert.equal(reporter.artifacts.length, 0);
+});
+
+test("runHostedRunner cancels execution when heartbeat is rejected", async () => {
+  const config = buildConfig();
+  let sawAbort = false;
+  const reporter = createMockReporter({
+    async heartbeat() {
+      return createHeartbeatResponse({ ok: false });
+    },
+  });
+
+  const executor: HostedRunnerTestExecutor = async (_tests, options) =>
+    new Promise<TestRunSummary>((_resolve, reject) => {
+      const abort = () => {
+        sawAbort = true;
+        reject(new Error("executor aborted"));
+      };
+
+      if (options.signal?.aborted) {
+        abort();
+        return;
+      }
+
+      options.signal?.addEventListener("abort", abort, { once: true });
+    });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+    heartbeatIntervalMs: 10,
+  });
+
+  assert.equal(result.status, "Cancelled");
+  assert.equal(sawAbort, true);
+  assert.equal(reporter.heartbeats.length, 1);
+  assert.equal(reporter.testResults.length, 0);
+  assert.equal(reporter.completions.length, 1);
+  assert.equal(reporter.completions[0]!.request.status, 4); // Cancelled
+  assert.equal(reporter.completions[0]!.request.failedTests, 0);
+});
+
+test("runHostedRunner times out execution using the hosted run timeout", async () => {
+  const config = buildConfig({
+    limits: {
+      runTimeoutSeconds: 0.01,
+      perTestTimeoutSeconds: 30,
+      maxTestsPerRun: 10,
+      maxArtifactSizeBytes: 10485760,
+      maxRepairAttempts: 1,
+    },
+  });
+  let sawAbort = false;
+  const reporter = createMockReporter();
+
+  const executor: HostedRunnerTestExecutor = async (_tests, options) =>
+    new Promise<TestRunSummary>((_resolve, reject) => {
+      const abort = () => {
+        sawAbort = true;
+        reject(new Error("executor aborted"));
+      };
+
+      if (options.signal?.aborted) {
+        abort();
+        return;
+      }
+
+      options.signal?.addEventListener("abort", abort, { once: true });
+    });
+
+  const result = await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(result.status, "TimedOut");
+  assert.equal(sawAbort, true);
+  assert.equal(reporter.testResults.length, 0);
+  assert.equal(reporter.completions.length, 1);
+  assert.equal(reporter.completions[0]!.request.status, 5); // TimedOut
+  assert.match(reporter.completions[0]!.request.errorMessage as string, /timed out/i);
 });
 
 test("runHostedRunner reports failure when tests fail", async () => {
@@ -488,6 +600,9 @@ test("runHostedRunner per-test reporting failure does not prevent run completion
   const completions: ReportedCompletion[] = [];
 
   const failingReporter: HostedRunnerResultReporter = {
+    async heartbeat() {
+      return createHeartbeatResponse();
+    },
     async reportTestResult() {
       throw new Error("Network error");
     },
@@ -855,6 +970,9 @@ test("runHostedRunner artifact upload failure does not fail the run", async () =
   const completions: ReportedCompletion[] = [];
 
   const reporter: HostedRunnerResultReporter = {
+    async heartbeat() {
+      return createHeartbeatResponse();
+    },
     async reportTestResult() {
       return { resultId: "result-1", validationAttemptId: "attempt-1" };
     },

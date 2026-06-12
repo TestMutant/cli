@@ -3,6 +3,7 @@ import {
   HostedRunnerApiClient,
   type CliRunImplementation,
   type HostedRunnerArtifactUploadRequest,
+  type HostedRunnerHeartbeatResponse,
   type HostedRunnerCompleteRunResultRequest,
   type HostedRunnerTestResultRequest,
 } from "./api-client";
@@ -43,7 +44,7 @@ const ArtifactKind = {
 export type HostedRunnerResult = {
   runId: string;
   projectId: string;
-  status: "Passed" | "Failed";
+  status: "Passed" | "Failed" | "Cancelled" | "TimedOut";
   totalTests: number;
   passedTests: number;
   failedTests: number;
@@ -57,6 +58,10 @@ export type HostedRunnerTestExecutor = (
 ) => Promise<TestRunSummary>;
 
 export type HostedRunnerResultReporter = {
+  heartbeat(
+    projectId: string,
+    runId: string,
+  ): Promise<HostedRunnerHeartbeatResponse>;
   reportTestResult(
     projectId: string,
     runId: string,
@@ -82,7 +87,21 @@ export type HostedRunnerResultReporter = {
 export type HostedRunnerOptions = {
   testExecutor?: HostedRunnerTestExecutor;
   resultReporter?: HostedRunnerResultReporter;
+  heartbeatIntervalMs?: number;
 };
+
+type HostedRunnerTerminalStatus = "Cancelled" | "TimedOut";
+
+class HostedRunnerStoppedError extends Error {
+  constructor(
+    readonly status: HostedRunnerTerminalStatus,
+    message: string,
+    readonly errorMessage: string | null,
+  ) {
+    super(message);
+    this.name = "HostedRunnerStoppedError";
+  }
+}
 
 /**
  * Executes a hosted runner job using the API-provided configuration.
@@ -108,15 +127,59 @@ export async function runHostedRunner(
   const maxArtifactSizeBytes = config.limits.maxArtifactSizeBytes;
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const resultReporter = options.resultReporter ?? createDefaultResultReporter(config);
+  const heartbeatMonitor = createHeartbeatMonitor(
+    config,
+    resultReporter,
+    options.heartbeatIntervalMs ?? 30_000,
+  );
 
   const startedAtUtc = new Date().toISOString();
-  const testSummary = await executeTests(testExecutor, implementations, {
-    baseUrl,
-    perTestTimeoutMs,
-    traceMode: "retain-on-failure",
-    videoMode: "retain-on-failure",
-    captureRepairFeedback: true,
-  });
+  let testSummary: TestRunSummary;
+
+  try {
+    heartbeatMonitor.start();
+    testSummary = await executeTests(testExecutor, implementations, {
+      baseUrl,
+      perTestTimeoutMs,
+      traceMode: "retain-on-failure",
+      videoMode: "retain-on-failure",
+      captureRepairFeedback: true,
+      signal: heartbeatMonitor.signal,
+    });
+    heartbeatMonitor.throwIfStopped();
+  } catch (error) {
+    if (error instanceof HostedRunnerStoppedError) {
+      const completedAtUtc = new Date().toISOString();
+      const durationMs =
+        new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
+      await completeStoppedRun(
+        resultReporter,
+        config,
+        error,
+        implementations.length,
+        baseUrl,
+        startedAtUtc,
+        completedAtUtc,
+        durationMs,
+      );
+
+      return {
+        runId: config.runId,
+        projectId: config.projectId,
+        status: error.status,
+        totalTests: implementations.length,
+        passedTests: 0,
+        failedTests: 0,
+        durationMs,
+        artifactsUploaded: 0,
+      };
+    }
+
+    throw error;
+  } finally {
+    await heartbeatMonitor.stop();
+  }
+
   const completedAtUtc = new Date().toISOString();
   const durationMs = new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
 
@@ -124,6 +187,7 @@ export async function runHostedRunner(
   let artifactsUploaded = 0;
 
   for (const test of testSummary.tests) {
+    heartbeatMonitor.throwIfStopped();
     const resultStatus =
       test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
 
@@ -156,6 +220,7 @@ export async function runHostedRunner(
       maxArtifactSizeBytes,
     );
     artifactsUploaded += artifactUploads.uploadedCount;
+    heartbeatMonitor.throwIfStopped();
 
     const finalOutputJson = buildRepairFeedbackOutput(
       test,
@@ -209,6 +274,199 @@ export async function runHostedRunner(
   };
 }
 
+function createHeartbeatMonitor(
+  config: HostedRunnerConfig,
+  reporter: HostedRunnerResultReporter,
+  intervalMs: number,
+): {
+  signal: AbortSignal;
+  start(): void;
+  stop(): Promise<void>;
+  throwIfStopped(): void;
+} {
+  const controller = new AbortController();
+  let stopped = false;
+  let loop: Promise<void> | null = null;
+  let tokenExpiryTimeout: NodeJS.Timeout | null = null;
+  let runTimeout: NodeJS.Timeout | null = null;
+  let stopReason: HostedRunnerStoppedError | null = null;
+
+  const stopWith = (reason: HostedRunnerStoppedError): void => {
+    if (stopReason) {
+      return;
+    }
+
+    stopReason = reason;
+    controller.abort(reason);
+  };
+
+  const clearTokenExpiryTimeout = (): void => {
+    if (tokenExpiryTimeout) {
+      clearTimeout(tokenExpiryTimeout);
+      tokenExpiryTimeout = null;
+    }
+  };
+
+  const clearRunTimeout = (): void => {
+    if (runTimeout) {
+      clearTimeout(runTimeout);
+      runTimeout = null;
+    }
+  };
+
+  const scheduleTokenExpiry = (expiresAtUtc: string): void => {
+    const expiresAtMs = new Date(expiresAtUtc).getTime();
+    if (!Number.isFinite(expiresAtMs)) {
+      return;
+    }
+
+    clearTokenExpiryTimeout();
+    const delayMs = Math.max(0, expiresAtMs - Date.now() - 1_000);
+    tokenExpiryTimeout = setTimeout(() => {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "TimedOut",
+          "Hosted runner session token expired.",
+          "Hosted runner session token expired before the run completed.",
+        ),
+      );
+    }, delayMs);
+    tokenExpiryTimeout.unref?.();
+  };
+
+  const scheduleRunTimeout = (): void => {
+    const delayMs = Math.max(0.001, config.limits.runTimeoutSeconds) * 1000;
+    runTimeout = setTimeout(() => {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "TimedOut",
+          "Hosted runner job exceeded the run timeout.",
+          `Hosted runner timed out after ${config.limits.runTimeoutSeconds} seconds.`,
+        ),
+      );
+    }, delayMs);
+    runTimeout.unref?.();
+  };
+
+  const sendHeartbeat = async (): Promise<void> => {
+    const heartbeat = await reporter.heartbeat(config.projectId, config.runId);
+    if (stopped || controller.signal.aborted) {
+      return;
+    }
+
+    if (!heartbeat.ok) {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "Cancelled",
+          "Hosted runner heartbeat was rejected.",
+          "Hosted runner heartbeat was rejected by the API.",
+        ),
+      );
+      return;
+    }
+
+    scheduleTokenExpiry(heartbeat.expiresAtUtc);
+  };
+
+  return {
+    signal: controller.signal,
+    start() {
+      if (loop) {
+        return;
+      }
+
+      scheduleRunTimeout();
+      const normalizedIntervalMs = Math.max(250, intervalMs);
+      loop = (async () => {
+        while (!stopped && !controller.signal.aborted) {
+          try {
+            await sendHeartbeat();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            stopWith(
+              new HostedRunnerStoppedError(
+                "Cancelled",
+                "Hosted runner heartbeat failed.",
+                message,
+              ),
+            );
+            break;
+          }
+
+          await wait(normalizedIntervalMs, controller.signal);
+        }
+      })().catch(() => {});
+    },
+    async stop() {
+      stopped = true;
+      clearTokenExpiryTimeout();
+      clearRunTimeout();
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+
+      await loop;
+      clearTokenExpiryTimeout();
+      clearRunTimeout();
+    },
+    throwIfStopped() {
+      if (stopReason) {
+        throw stopReason;
+      }
+    },
+  };
+}
+
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms);
+    timeout.unref?.();
+
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+async function completeStoppedRun(
+  reporter: HostedRunnerResultReporter,
+  config: HostedRunnerConfig,
+  error: HostedRunnerStoppedError,
+  totalTests: number,
+  environmentUrl: string | null,
+  startedAtUtc: string,
+  completedAtUtc: string,
+  durationMs: number,
+): Promise<void> {
+  const runStatus = error.status === "Cancelled"
+    ? RunStatus.Cancelled
+    : RunStatus.TimedOut;
+
+  await reporter
+    .completeRunResults(config.projectId, config.runId, {
+      status: runStatus,
+      summary: error.message,
+      errorMessage: error.errorMessage,
+      totalTests,
+      passedTests: 0,
+      failedTests: 0,
+      durationMs,
+      environmentUrl,
+      startedAtUtc,
+      completedAtUtc,
+    })
+    .catch(() => {});
+}
+
 function toCliRunImplementation(
   test: HostedRunnerTestDefinition,
 ): CliRunImplementation {
@@ -228,6 +486,7 @@ type ExecutionOptions = {
   traceMode: "off" | "retain-on-failure";
   videoMode: "off" | "retain-on-failure";
   captureRepairFeedback: boolean;
+  signal?: AbortSignal;
 };
 
 type UploadedArtifactReference = {
@@ -260,14 +519,26 @@ async function executeTests(
   }
 
   try {
-    return await testExecutor(implementations, {
+    const summary = await testExecutor(implementations, {
       baseUrl: options.baseUrl,
       perTestTimeoutMs: options.perTestTimeoutMs,
       traceMode: options.traceMode,
       videoMode: options.videoMode,
       captureRepairFeedback: options.captureRepairFeedback,
+      signal: options.signal,
     });
+    const stopReason = getHostedRunnerStopReason(options.signal);
+    if (stopReason) {
+      throw stopReason;
+    }
+
+    return summary;
   } catch (error) {
+    const stopReason = getHostedRunnerStopReason(options.signal);
+    if (stopReason) {
+      throw stopReason;
+    }
+
     const message = error instanceof Error ? error.message : String(error);
 
     return {
@@ -289,6 +560,14 @@ async function executeTests(
       })),
     };
   }
+}
+
+function getHostedRunnerStopReason(
+  signal: AbortSignal | undefined,
+): HostedRunnerStoppedError | null {
+  return signal?.aborted && signal.reason instanceof HostedRunnerStoppedError
+    ? signal.reason
+    : null;
 }
 
 /**
@@ -533,6 +812,9 @@ function createDefaultResultReporter(
   });
 
   return {
+    async heartbeat(projectId, runId) {
+      return client.heartbeat(projectId, runId);
+    },
     async reportTestResult(projectId, runId, implementationId, request) {
       const response = await client.reportTestResult(projectId, runId, implementationId, request);
       return {

@@ -41,6 +41,7 @@ export type PlaywrightExecutionOptions = {
   traceMode?: "off" | "retain-on-failure";
   videoMode?: "off" | "retain-on-failure";
   captureRepairFeedback?: boolean;
+  signal?: AbortSignal;
   cwd?: string;
   commandRunner?: PlaywrightCommandRunner;
 };
@@ -54,6 +55,7 @@ export type PlaywrightCommandRunner = (
 export type PlaywrightCommandOptions = {
   cwd: string;
   env: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 };
 
 export type PlaywrightCommandResult = {
@@ -162,17 +164,20 @@ export async function runPlaywrightTests(
 
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
 
-    await ensurePlaywrightBrowserInstalled();
+    const runtimeEnv = {
+      ...process.env,
+      NODE_PATH: buildNodePath(process.env.NODE_PATH),
+    };
+
+    await ensureBrowserInstalledForRun(commandRunner, workDir, runtimeEnv, options.signal);
 
     const result = await commandRunner(
       process.execPath,
       getPlaywrightTestArgs(workDir, writtenTests),
       {
         cwd: workDir,
-        env: {
-          ...process.env,
-          NODE_PATH: buildNodePath(process.env.NODE_PATH),
-        },
+        env: runtimeEnv,
+        signal: options.signal,
       },
     );
 
@@ -554,6 +559,32 @@ function getPlaywrightInstallArgs(): string[] {
   return [getPlaywrightCliPath(), "install", "chromium"];
 }
 
+async function ensureBrowserInstalledForRun(
+  commandRunner: PlaywrightCommandRunner,
+  workDir: string,
+  env: NodeJS.ProcessEnv,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (commandRunner === defaultCommandRunner) {
+    await ensurePlaywrightBrowserInstalled();
+    return;
+  }
+
+  const result = await commandRunner(process.execPath, getPlaywrightInstallArgs(), {
+    cwd: workDir,
+    env,
+    signal,
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(
+      meaningfulStderr(result.stderr) ??
+        firstNonEmpty(result.stdout) ??
+        "Failed to install Playwright Chromium browser.",
+    );
+  }
+}
+
 function getPlaywrightTestArgs(
   workDir: string,
   writtenTests: WrittenTest[],
@@ -637,7 +668,7 @@ function defaultCommandRunner(
   options: PlaywrightCommandOptions,
 ): Promise<PlaywrightCommandResult> {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       command,
       args,
       {
@@ -663,6 +694,20 @@ function defaultCommandRunner(
         });
       },
     );
+
+    const abort = () => {
+      child.kill();
+    };
+
+    if (options.signal?.aborted) {
+      abort();
+      return;
+    }
+
+    options.signal?.addEventListener("abort", abort, { once: true });
+    child.once("exit", () => {
+      options.signal?.removeEventListener("abort", abort);
+    });
   });
 }
 

@@ -154,16 +154,18 @@ async function runPlaywrightTests(tests, options = {}) {
       options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    await ensurePlaywrightBrowserInstalled();
+    const runtimeEnv = {
+      ...process.env,
+      NODE_PATH: buildNodePath(process.env.NODE_PATH)
+    };
+    await ensureBrowserInstalledForRun(commandRunner, workDir, runtimeEnv, options.signal);
     const result = await commandRunner(
       process.execPath,
       getPlaywrightTestArgs(workDir, writtenTests),
       {
         cwd: workDir,
-        env: {
-          ...process.env,
-          NODE_PATH: buildNodePath(process.env.NODE_PATH)
-        }
+        env: runtimeEnv,
+        signal: options.signal
       }
     );
     const mappedResults = await mapPlaywrightResults(
@@ -446,6 +448,28 @@ function buildNodePath(existing) {
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
 }
+function getPlaywrightInstallArgs() {
+  if (process.platform === "linux") {
+    return [getPlaywrightCliPath(), "install", "--with-deps", "chromium"];
+  }
+  return [getPlaywrightCliPath(), "install", "chromium"];
+}
+async function ensureBrowserInstalledForRun(commandRunner, workDir, env, signal) {
+  if (commandRunner === defaultCommandRunner) {
+    await ensurePlaywrightBrowserInstalled();
+    return;
+  }
+  const result = await commandRunner(process.execPath, getPlaywrightInstallArgs(), {
+    cwd: workDir,
+    env,
+    signal
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      meaningfulStderr(result.stderr) ?? firstNonEmpty(result.stdout) ?? "Failed to install Playwright Chromium browser."
+    );
+  }
+}
 function getPlaywrightTestArgs(workDir, writtenTests) {
   return [
     getPlaywrightCliPath(),
@@ -503,7 +527,7 @@ function delimiter() {
 }
 function defaultCommandRunner(command, args, options) {
   return new Promise((resolve) => {
-    (0, import_node_child_process3.execFile)(
+    const child = (0, import_node_child_process3.execFile)(
       command,
       args,
       {
@@ -520,6 +544,17 @@ function defaultCommandRunner(command, args, options) {
         });
       }
     );
+    const abort = () => {
+      child.kill();
+    };
+    if (options.signal?.aborted) {
+      abort();
+      return;
+    }
+    options.signal?.addEventListener("abort", abort, { once: true });
+    child.once("exit", () => {
+      options.signal?.removeEventListener("abort", abort);
+    });
   });
 }
 function safeFilePart(value) {
@@ -1558,6 +1593,16 @@ var ArtifactKind = {
   Console: 5,
   NetworkSummary: 6
 };
+var HostedRunnerStoppedError = class extends Error {
+  constructor(status, message, errorMessage) {
+    super(message);
+    this.status = status;
+    this.errorMessage = errorMessage;
+    this.name = "HostedRunnerStoppedError";
+  }
+  status;
+  errorMessage;
+};
 async function runHostedRunner(config, options = {}) {
   const testDefinitions = config.payload.testSource?.tests ?? [];
   const implementations = testDefinitions.map(toCliRunImplementation);
@@ -1566,18 +1611,58 @@ async function runHostedRunner(config, options = {}) {
   const maxArtifactSizeBytes = config.limits.maxArtifactSizeBytes;
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const resultReporter = options.resultReporter ?? createDefaultResultReporter(config);
+  const heartbeatMonitor = createHeartbeatMonitor(
+    config,
+    resultReporter,
+    options.heartbeatIntervalMs ?? 3e4
+  );
   const startedAtUtc = (/* @__PURE__ */ new Date()).toISOString();
-  const testSummary = await executeTests(testExecutor, implementations, {
-    baseUrl,
-    perTestTimeoutMs,
-    traceMode: "retain-on-failure",
-    videoMode: "retain-on-failure",
-    captureRepairFeedback: true
-  });
+  let testSummary;
+  try {
+    heartbeatMonitor.start();
+    testSummary = await executeTests(testExecutor, implementations, {
+      baseUrl,
+      perTestTimeoutMs,
+      traceMode: "retain-on-failure",
+      videoMode: "retain-on-failure",
+      captureRepairFeedback: true,
+      signal: heartbeatMonitor.signal
+    });
+    heartbeatMonitor.throwIfStopped();
+  } catch (error) {
+    if (error instanceof HostedRunnerStoppedError) {
+      const completedAtUtc2 = (/* @__PURE__ */ new Date()).toISOString();
+      const durationMs2 = new Date(completedAtUtc2).getTime() - new Date(startedAtUtc).getTime();
+      await completeStoppedRun(
+        resultReporter,
+        config,
+        error,
+        implementations.length,
+        baseUrl,
+        startedAtUtc,
+        completedAtUtc2,
+        durationMs2
+      );
+      return {
+        runId: config.runId,
+        projectId: config.projectId,
+        status: error.status,
+        totalTests: implementations.length,
+        passedTests: 0,
+        failedTests: 0,
+        durationMs: durationMs2,
+        artifactsUploaded: 0
+      };
+    }
+    throw error;
+  } finally {
+    await heartbeatMonitor.stop();
+  }
   const completedAtUtc = (/* @__PURE__ */ new Date()).toISOString();
   const durationMs = new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
   let artifactsUploaded = 0;
   for (const test of testSummary.tests) {
+    heartbeatMonitor.throwIfStopped();
     const resultStatus = test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
     const initialOutputJson = buildRepairFeedbackOutput(test, null, null);
     const baseRequest = buildTestResultRequest(
@@ -1604,6 +1689,7 @@ async function runHostedRunner(config, options = {}) {
       maxArtifactSizeBytes
     );
     artifactsUploaded += artifactUploads.uploadedCount;
+    heartbeatMonitor.throwIfStopped();
     const finalOutputJson = buildRepairFeedbackOutput(
       test,
       artifactUploads,
@@ -1641,6 +1727,159 @@ async function runHostedRunner(config, options = {}) {
     artifactsUploaded
   };
 }
+function createHeartbeatMonitor(config, reporter, intervalMs) {
+  const controller = new AbortController();
+  let stopped = false;
+  let loop = null;
+  let tokenExpiryTimeout = null;
+  let runTimeout = null;
+  let stopReason = null;
+  const stopWith = (reason) => {
+    if (stopReason) {
+      return;
+    }
+    stopReason = reason;
+    controller.abort(reason);
+  };
+  const clearTokenExpiryTimeout = () => {
+    if (tokenExpiryTimeout) {
+      clearTimeout(tokenExpiryTimeout);
+      tokenExpiryTimeout = null;
+    }
+  };
+  const clearRunTimeout = () => {
+    if (runTimeout) {
+      clearTimeout(runTimeout);
+      runTimeout = null;
+    }
+  };
+  const scheduleTokenExpiry = (expiresAtUtc) => {
+    const expiresAtMs = new Date(expiresAtUtc).getTime();
+    if (!Number.isFinite(expiresAtMs)) {
+      return;
+    }
+    clearTokenExpiryTimeout();
+    const delayMs = Math.max(0, expiresAtMs - Date.now() - 1e3);
+    tokenExpiryTimeout = setTimeout(() => {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "TimedOut",
+          "Hosted runner session token expired.",
+          "Hosted runner session token expired before the run completed."
+        )
+      );
+    }, delayMs);
+    tokenExpiryTimeout.unref?.();
+  };
+  const scheduleRunTimeout = () => {
+    const delayMs = Math.max(1e-3, config.limits.runTimeoutSeconds) * 1e3;
+    runTimeout = setTimeout(() => {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "TimedOut",
+          "Hosted runner job exceeded the run timeout.",
+          `Hosted runner timed out after ${config.limits.runTimeoutSeconds} seconds.`
+        )
+      );
+    }, delayMs);
+    runTimeout.unref?.();
+  };
+  const sendHeartbeat = async () => {
+    const heartbeat = await reporter.heartbeat(config.projectId, config.runId);
+    if (stopped || controller.signal.aborted) {
+      return;
+    }
+    if (!heartbeat.ok) {
+      stopWith(
+        new HostedRunnerStoppedError(
+          "Cancelled",
+          "Hosted runner heartbeat was rejected.",
+          "Hosted runner heartbeat was rejected by the API."
+        )
+      );
+      return;
+    }
+    scheduleTokenExpiry(heartbeat.expiresAtUtc);
+  };
+  return {
+    signal: controller.signal,
+    start() {
+      if (loop) {
+        return;
+      }
+      scheduleRunTimeout();
+      const normalizedIntervalMs = Math.max(250, intervalMs);
+      loop = (async () => {
+        while (!stopped && !controller.signal.aborted) {
+          try {
+            await sendHeartbeat();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            stopWith(
+              new HostedRunnerStoppedError(
+                "Cancelled",
+                "Hosted runner heartbeat failed.",
+                message
+              )
+            );
+            break;
+          }
+          await wait(normalizedIntervalMs, controller.signal);
+        }
+      })().catch(() => {
+      });
+    },
+    async stop() {
+      stopped = true;
+      clearTokenExpiryTimeout();
+      clearRunTimeout();
+      if (!controller.signal.aborted) {
+        controller.abort();
+      }
+      await loop;
+      clearTokenExpiryTimeout();
+      clearRunTimeout();
+    },
+    throwIfStopped() {
+      if (stopReason) {
+        throw stopReason;
+      }
+    }
+  };
+}
+function wait(ms, signal) {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms);
+    timeout.unref?.();
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      { once: true }
+    );
+  });
+}
+async function completeStoppedRun(reporter, config, error, totalTests, environmentUrl, startedAtUtc, completedAtUtc, durationMs) {
+  const runStatus = error.status === "Cancelled" ? RunStatus.Cancelled : RunStatus.TimedOut;
+  await reporter.completeRunResults(config.projectId, config.runId, {
+    status: runStatus,
+    summary: error.message,
+    errorMessage: error.errorMessage,
+    totalTests,
+    passedTests: 0,
+    failedTests: 0,
+    durationMs,
+    environmentUrl,
+    startedAtUtc,
+    completedAtUtc
+  }).catch(() => {
+  });
+}
 function toCliRunImplementation(test) {
   return {
     implementationId: test.implementationId,
@@ -1663,14 +1902,24 @@ async function executeTests(testExecutor, implementations, options) {
     };
   }
   try {
-    return await testExecutor(implementations, {
+    const summary = await testExecutor(implementations, {
       baseUrl: options.baseUrl,
       perTestTimeoutMs: options.perTestTimeoutMs,
       traceMode: options.traceMode,
       videoMode: options.videoMode,
-      captureRepairFeedback: options.captureRepairFeedback
+      captureRepairFeedback: options.captureRepairFeedback,
+      signal: options.signal
     });
+    const stopReason = getHostedRunnerStopReason(options.signal);
+    if (stopReason) {
+      throw stopReason;
+    }
+    return summary;
   } catch (error) {
+    const stopReason = getHostedRunnerStopReason(options.signal);
+    if (stopReason) {
+      throw stopReason;
+    }
     const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "playwright",
@@ -1691,6 +1940,9 @@ async function executeTests(testExecutor, implementations, options) {
       }))
     };
   }
+}
+function getHostedRunnerStopReason(signal) {
+  return signal?.aborted && signal.reason instanceof HostedRunnerStoppedError ? signal.reason : null;
 }
 async function uploadTestArtifacts(reporter, projectId, runId, resultId, validationAttemptId, test, maxArtifactSizeBytes) {
   const artifacts = [];
@@ -1853,6 +2105,9 @@ function createDefaultResultReporter(config) {
     timeoutMs: 3e4
   });
   return {
+    async heartbeat(projectId, runId) {
+      return client.heartbeat(projectId, runId);
+    },
     async reportTestResult(projectId, runId, implementationId, request) {
       const response = await client.reportTestResult(projectId, runId, implementationId, request);
       return {
@@ -2508,6 +2763,12 @@ var hostedRunCommand = program.command("hosted-run").description("Execute a host
       `Hosted run failed: ${result.failedTests} of ${result.totalTests} tests failed.`,
       1
     );
+  }
+  if (result.status === "Cancelled") {
+    throw new CliError("Hosted run was cancelled.", 1);
+  }
+  if (result.status === "TimedOut") {
+    throw new CliError("Hosted run timed out.", 124);
   }
 });
 hostedRunCommand.helpInformation = () => "";
