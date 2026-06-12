@@ -21,6 +21,7 @@ export class CliError extends Error {
   ) {
     super(message);
     this.name = "CliError";
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 

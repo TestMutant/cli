@@ -81,6 +81,7 @@ var init_config = __esm({
         super(message);
         this.exitCode = exitCode;
         this.name = "CliError";
+        Object.setPrototypeOf(this, new.target.prototype);
       }
       exitCode;
     };

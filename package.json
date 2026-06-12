@@ -12,7 +12,8 @@
     "build": "tsup && node scripts/fix-dist-mode.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build",
+    "test:package": "node scripts/verify-hosted-runner-package.mjs",
+    "check": "npm run typecheck && npm test && npm run build && npm run test:package",
     "check:dist": "git diff --exit-code -- dist",
     "ci": "node dist/index.js ci",
     "release:alpha": "npm version prerelease --preid alpha --no-git-tag-version && npm run check",
@@ -20,7 +21,7 @@
     "prepublishOnly": "npm run check"
   },
   "simple-git-hooks": {
-    "pre-push": "npm run typecheck && npm test && npm run build && git diff --exit-code -- dist"
+    "pre-push": "npm run typecheck && npm test && npm run build && npm run test:package && git diff --exit-code -- dist"
   },
   "files": [
     "dist"
