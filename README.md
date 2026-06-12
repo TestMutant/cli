@@ -122,6 +122,14 @@ Generated Playwright tests run with the CLI-managed Playwright runtime. In
 `Enforce` mode, failed generated tests are reported to the API before the CLI
 exits with a nonzero status.
 
+## Hosted Runner Invocation
+
+The hosted runner commands used by the API process/container are internal and
+hidden from public help output. See
+[`docs/hosted-runner-invocation.md`](docs/hosted-runner-invocation.md) for the
+API command shape, required environment variables, and Windows versus
+Linux/container packaging assumptions.
+
 ## License
 
 MIT. Copyright (c) 2026 Sleepycat Software LLC.
