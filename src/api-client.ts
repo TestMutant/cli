@@ -59,7 +59,15 @@ export class TestMutantApiClient {
       screenshot.byteOffset,
       screenshot.byteOffset + screenshot.byteLength,
     ) as ArrayBuffer;
+<<<<<<< Updated upstream
     formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
+=======
+    formData.append(
+      "file",
+      new Blob([bytes], { type: "image/png" }),
+      "screenshot.png",
+    );
+>>>>>>> Stashed changes
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
