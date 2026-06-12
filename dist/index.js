@@ -786,7 +786,7 @@ var init_agent_runner = __esm({
 });
 
 // src/index.ts
-var import_config6 = require("dotenv/config");
+var import_config7 = require("dotenv/config");
 var import_node_fs2 = require("fs");
 var import_node_path3 = require("path");
 
@@ -823,15 +823,11 @@ var TestMutantApiClient = class {
       screenshot.byteOffset,
       screenshot.byteOffset + screenshot.byteLength
     );
-<<<<<<< Updated upstream
-    formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
-=======
     formData.append(
       "file",
       new Blob([bytes], { type: "image/png" }),
       "screenshot.png"
     );
->>>>>>> Stashed changes
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
@@ -941,6 +937,75 @@ function truncate(value, maxLength) {
     return value;
   }
   return `${value.slice(0, maxLength)}...`;
+}
+var HostedRunnerApiClient = class {
+  constructor(options) {
+    this.options = options;
+  }
+  options;
+  async heartbeat(projectId, runId) {
+    return this.postJson(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/heartbeat`
+    );
+  }
+  async reportTestResult(projectId, runId, implementationId, request) {
+    return this.postJson(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/${enc(implementationId)}`,
+      request
+    );
+  }
+  async completeRunResults(projectId, runId, request) {
+    return this.postJson(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/complete`,
+      request
+    );
+  }
+  async postJson(path, body, expectedStatus = 200) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    try {
+      const response = await fetch(new URL(path, this.options.apiUrl), {
+        method: "POST",
+        body: body !== void 0 ? JSON.stringify(body) : void 0,
+        signal: controller.signal,
+        headers: {
+          accept: "application/json",
+          ...body !== void 0 ? { "content-type": "application/json" } : {},
+          authorization: `Bearer ${this.options.sessionToken}`
+        }
+      });
+      if (response.status === 401) {
+        throw new CliError("Hosted runner session token rejected. The token may have expired or been revoked.", 3);
+      }
+      if (response.status !== expectedStatus) {
+        const detail = await readErrorDetail(response);
+        throw new CliError(
+          `Hosted runner API request failed with HTTP ${response.status}.${detail}`
+        );
+      }
+      try {
+        return await response.json();
+      } catch {
+        throw new CliError("Hosted runner API returned invalid JSON.");
+      }
+    } catch (error) {
+      if (error instanceof CliError) {
+        throw error;
+      }
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new CliError(
+          `Hosted runner API request timed out after ${this.options.timeoutMs} ms.`
+        );
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new CliError(`Could not reach hosted runner API. ${message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+};
+function enc(value) {
+  return encodeURIComponent(value);
 }
 
 // src/ci-metadata.ts
@@ -1237,7 +1302,7 @@ async function runCi(options) {
     errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`,
     results: testSummary.tests.map((t) => ({
       implementationId: t.implementationId,
-      passed: t.status === "Passed",
+      status: t.status === "Passed" ? 0 : 1,
       durationMs: t.durationMs,
       errorMessage: t.errorMessage,
       stackTrace: null
@@ -1321,6 +1386,225 @@ async function executeAgentGenerationForApiCompletion(agentGenerator, options) {
       errorMessage: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+// src/hosted-runner.ts
+init_playwright_runner();
+var ResultStatus = {
+  Passed: 0,
+  Failed: 1,
+  Skipped: 2
+};
+var RunStatus = {
+  Created: 0,
+  Running: 1,
+  Completed: 2,
+  Failed: 3,
+  Cancelled: 4,
+  TimedOut: 5
+};
+async function runHostedRunner(config, options = {}) {
+  const testDefinitions = config.payload.testSource?.tests ?? [];
+  const implementations = testDefinitions.map(toCliRunImplementation);
+  const baseUrl = config.payload.project?.baseUrl ?? config.payload.environment?.baseUrl ?? null;
+  const perTestTimeoutMs = config.limits.perTestTimeoutSeconds * 1e3;
+  const testExecutor = options.testExecutor ?? runPlaywrightTests;
+  const resultReporter = options.resultReporter ?? createDefaultResultReporter(config);
+  const testSummary = await executeTests(testExecutor, implementations, baseUrl, perTestTimeoutMs);
+  for (const test of testSummary.tests) {
+    const resultStatus = test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
+    await resultReporter.reportTestResult(config.projectId, config.runId, test.implementationId, {
+      status: resultStatus,
+      durationMs: test.durationMs,
+      errorMessage: test.errorMessage,
+      environmentUrl: baseUrl
+    }).catch(() => {
+    });
+  }
+  const passed = testSummary.failed === 0 && testSummary.total > 0;
+  const runStatus = passed ? RunStatus.Completed : RunStatus.Failed;
+  await resultReporter.completeRunResults(config.projectId, config.runId, {
+    status: runStatus,
+    summary: testSummary.total === 0 ? "No tests were provided for execution." : `Executed ${testSummary.total} test${testSummary.total === 1 ? "" : "s"}: ${testSummary.passed} passed, ${testSummary.failed} failed.`,
+    errorMessage: passed ? null : testSummary.total === 0 ? "No tests were provided for execution." : `${testSummary.failed} test${testSummary.failed === 1 ? "" : "s"} failed.`,
+    totalTests: testSummary.total,
+    passedTests: testSummary.passed,
+    failedTests: testSummary.failed,
+    environmentUrl: baseUrl
+  });
+  return {
+    runId: config.runId,
+    projectId: config.projectId,
+    status: passed ? "Passed" : "Failed",
+    totalTests: testSummary.total,
+    passedTests: testSummary.passed,
+    failedTests: testSummary.failed
+  };
+}
+function toCliRunImplementation(test) {
+  return {
+    implementationId: test.implementationId,
+    testSpecId: test.testSpecId,
+    testLayer: test.testLayer,
+    runnerKind: test.runnerKind,
+    name: test.name,
+    source: test.source
+  };
+}
+async function executeTests(testExecutor, implementations, baseUrl, _perTestTimeoutMs) {
+  if (implementations.length === 0) {
+    return {
+      kind: "playwright",
+      baseUrl,
+      total: 0,
+      passed: 0,
+      failed: 0,
+      tests: []
+    };
+  }
+  try {
+    return await testExecutor(implementations, { baseUrl });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      kind: "playwright",
+      baseUrl,
+      total: implementations.length,
+      passed: 0,
+      failed: implementations.length,
+      tests: implementations.map((impl) => ({
+        implementationId: impl.implementationId,
+        runnerKind: impl.runnerKind,
+        name: impl.name,
+        status: "Failed",
+        errorMessage: message,
+        durationMs: null,
+        screenshotBuffer: null
+      }))
+    };
+  }
+}
+function createDefaultResultReporter(config) {
+  const client = new HostedRunnerApiClient({
+    apiUrl: config.apiUrl,
+    sessionToken: config.sessionToken,
+    timeoutMs: 3e4
+  });
+  return {
+    async reportTestResult(projectId, runId, implementationId, request) {
+      await client.reportTestResult(projectId, runId, implementationId, request);
+    },
+    async completeRunResults(projectId, runId, request) {
+      await client.completeRunResults(projectId, runId, request);
+    }
+  };
+}
+
+// src/hosted-runner-config.ts
+init_config();
+var HOSTED_RUNNER_JOB_ID_ENV_VAR = "TESTMUTANT_HOSTED_RUNNER_JOB_ID";
+var ORGANIZATION_ID_ENV_VAR = "TESTMUTANT_ORGANIZATION_ID";
+var PROJECT_ID_ENV_VAR = "TESTMUTANT_PROJECT_ID";
+var RUN_ID_ENV_VAR = "TESTMUTANT_RUN_ID";
+var RUNNER_SESSION_TOKEN_ENV_VAR = "TESTMUTANT_RUNNER_SESSION_TOKEN";
+var HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR = "TESTMUTANT_HOSTED_RUNNER_PAYLOAD_JSON";
+var ENVIRONMENT_CONFIGURATION_ID_ENV_VAR = "TESTMUTANT_ENVIRONMENT_CONFIGURATION_ID";
+var RUN_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_RUN_TIMEOUT_SECONDS";
+var PER_TEST_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_PER_TEST_TIMEOUT_SECONDS";
+var MAX_TESTS_PER_RUN_ENV_VAR = "TESTMUTANT_MAX_TESTS_PER_RUN";
+var MAX_ARTIFACT_SIZE_BYTES_ENV_VAR = "TESTMUTANT_MAX_ARTIFACT_SIZE_BYTES";
+var MAX_REPAIR_ATTEMPTS_ENV_VAR = "TESTMUTANT_MAX_REPAIR_ATTEMPTS";
+function resolveHostedRunnerConfig() {
+  const hostedRunnerJobId = requireEnv(HOSTED_RUNNER_JOB_ID_ENV_VAR);
+  const organizationId = requireEnv(ORGANIZATION_ID_ENV_VAR);
+  const projectId = requireEnv(PROJECT_ID_ENV_VAR);
+  const runId = requireEnv(RUN_ID_ENV_VAR);
+  const sessionToken = requireEnv(RUNNER_SESSION_TOKEN_ENV_VAR);
+  const payloadJson = requireEnv(HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR);
+  const apiUrl = process.env[API_URL_ENV_VAR]?.trim() || DEFAULT_API_URL;
+  const environmentConfigurationId = process.env[ENVIRONMENT_CONFIGURATION_ID_ENV_VAR]?.trim() || null;
+  const payload = parsePayloadJson(payloadJson);
+  return {
+    hostedRunnerJobId,
+    organizationId,
+    projectId,
+    runId,
+    sessionToken,
+    apiUrl: normalizeUrl2(apiUrl),
+    environmentConfigurationId,
+    payload,
+    limits: {
+      runTimeoutSeconds: parsePositiveInt(RUN_TIMEOUT_SECONDS_ENV_VAR, 1800),
+      perTestTimeoutSeconds: parsePositiveInt(PER_TEST_TIMEOUT_SECONDS_ENV_VAR, 60),
+      maxTestsPerRun: parsePositiveInt(MAX_TESTS_PER_RUN_ENV_VAR, 25),
+      maxArtifactSizeBytes: parsePositiveInt(MAX_ARTIFACT_SIZE_BYTES_ENV_VAR, 50 * 1024 * 1024),
+      maxRepairAttempts: parsePositiveInt(MAX_REPAIR_ATTEMPTS_ENV_VAR, 2)
+    }
+  };
+}
+function requireEnv(name) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new CliError(
+      `Hosted runner mode requires ${name} to be set.`,
+      2
+    );
+  }
+  return value;
+}
+function parsePositiveInt(envVar, defaultValue) {
+  const raw = process.env[envVar]?.trim();
+  if (!raw) {
+    return defaultValue;
+  }
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+function parsePayloadJson(json) {
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: invalid JSON.`,
+      2
+    );
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: expected a JSON object.`,
+      2
+    );
+  }
+  const payload = parsed;
+  if (!payload.project || typeof payload.project !== "object") {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: missing project context.`,
+      2
+    );
+  }
+  if (!payload.testSource || typeof payload.testSource !== "object") {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: missing test source.`,
+      2
+    );
+  }
+  if (!payload.limits || typeof payload.limits !== "object") {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: missing limits.`,
+      2
+    );
+  }
+  if (!payload.artifactUploads || typeof payload.artifactUploads !== "object") {
+    throw new CliError(
+      `Failed to parse ${HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR}: missing artifact upload instructions.`,
+      2
+    );
+  }
+  return parsed;
+}
+function normalizeUrl2(value) {
+  return value.replace(/\/$/, "");
 }
 
 // src/index.ts
@@ -1407,6 +1691,29 @@ program.command("generate").description("Generate test implementations via the T
     );
   }
 );
+var hostedRunCommand = program.command("hosted-run").description("Execute a hosted runner job using API-provided context. (Internal)").action(async () => {
+  const options = program.opts();
+  const config = resolveHostedRunnerConfig();
+  const result = await runHostedRunner(config);
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Hosted run completed.`);
+  console.log(`Run ID: ${result.runId}`);
+  console.log(`Project ID: ${result.projectId}`);
+  console.log(`Status: ${result.status}`);
+  console.log(
+    `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`
+  );
+  if (result.status === "Failed") {
+    throw new CliError(
+      `Hosted run failed: ${result.failedTests} of ${result.totalTests} tests failed.`,
+      1
+    );
+  }
+});
+hostedRunCommand.helpInformation = () => "";
 program.showHelpAfterError();
 program.parseAsync(process.argv).catch((error) => {
   if (error instanceof CliError) {

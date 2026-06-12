@@ -822,15 +822,11 @@ var TestMutantApiClient = class {
       screenshot.byteOffset,
       screenshot.byteOffset + screenshot.byteLength
     );
-<<<<<<< Updated upstream
-    formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
-=======
     formData.append(
       "file",
       new Blob([bytes], { type: "image/png" }),
       "screenshot.png"
     );
->>>>>>> Stashed changes
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
@@ -1236,7 +1232,7 @@ async function runCi(options) {
     errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`,
     results: testSummary.tests.map((t) => ({
       implementationId: t.implementationId,
-      passed: t.status === "Passed",
+      status: t.status === "Passed" ? 0 : 1,
       durationMs: t.durationMs,
       errorMessage: t.errorMessage,
       stackTrace: null
