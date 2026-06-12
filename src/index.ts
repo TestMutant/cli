@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runCi } from "./run-ci";
 import { runHostedRunner } from "./hosted-runner";
-import { resolveHostedRunnerConfig } from "./hosted-runner-config";
+import { runHostedEnvironmentCheck } from "./hosted-environment-check";
+import { resolveHostedRunnerConfig, resolveEnvironmentCheckConfig } from "./hosted-runner-config";
 import { Command } from "commander";
 import { TestMutantApiClient } from "./api-client";
 import { buildCreateRunRequest } from "./ci-metadata";
@@ -206,6 +207,34 @@ const hostedRunCommand = program
 
 // Hide the hosted-run command from help output; it is invoked by the API server, not by users.
 hostedRunCommand.helpInformation = () => "";
+
+const hostedEnvCheckCommand = program
+  .command("hosted-env-check")
+  .description("Execute a hosted environment check using API-provided context. (Internal)")
+  .action(async () => {
+    const options = program.opts<GlobalOptions>();
+    const config = resolveEnvironmentCheckConfig();
+
+    const result = await runHostedEnvironmentCheck(config);
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(`Environment check completed.`);
+    console.log(`Check ID: ${config.environmentCheckId}`);
+    console.log(`Status: ${result.status}`);
+    if (result.statusReason) {
+      console.log(`Reason: ${result.statusReason}`);
+    }
+    if (result.artifactId) {
+      console.log(`Screenshot artifact: ${result.artifactId}`);
+    }
+  });
+
+// Hide the hosted-env-check command from help output; it is invoked by the API server, not by users.
+hostedEnvCheckCommand.helpInformation = () => "";
 
 program.showHelpAfterError();
 

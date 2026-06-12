@@ -1,9 +1,12 @@
 import type { components } from "./generated/api";
 import { API_URL_ENV_VAR, CliError, DEFAULT_API_URL } from "./config";
+import type { EnvironmentCheckContext } from "./environment-check";
+import { AuthMode } from "./environment-check";
 
 export type HostedRunnerPayload = components["schemas"]["HostedRunnerPayload"];
 export type HostedRunnerProjectContext = components["schemas"]["HostedRunnerProjectContext"];
 export type HostedRunnerEnvironmentContext = components["schemas"]["HostedRunnerEnvironmentContext"];
+export type HostedRunnerAuthInstructions = components["schemas"]["HostedRunnerAuthInstructions"];
 export type HostedRunnerTestSource = components["schemas"]["HostedRunnerTestSource"];
 export type HostedRunnerTestDefinition = components["schemas"]["HostedRunnerTestDefinition"];
 export type HostedRunnerLimits = components["schemas"]["HostedRunnerLimits"];
@@ -22,6 +25,8 @@ export const PER_TEST_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_PER_TEST_TIMEOUT_SEC
 export const MAX_TESTS_PER_RUN_ENV_VAR = "TESTMUTANT_MAX_TESTS_PER_RUN";
 export const MAX_ARTIFACT_SIZE_BYTES_ENV_VAR = "TESTMUTANT_MAX_ARTIFACT_SIZE_BYTES";
 export const MAX_REPAIR_ATTEMPTS_ENV_VAR = "TESTMUTANT_MAX_REPAIR_ATTEMPTS";
+export const ENVIRONMENT_CHECK_ID_ENV_VAR = "TESTMUTANT_ENVIRONMENT_CHECK_ID";
+export const ENVIRONMENT_CHECK_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS";
 
 export type HostedRunnerConfig = {
   hostedRunnerJobId: string;
@@ -164,6 +169,93 @@ function parsePayloadJson(json: string): HostedRunnerPayload {
   }
 
   return parsed as HostedRunnerPayload;
+}
+
+export type EnvironmentCheckConfig = {
+  hostedRunnerJobId: string;
+  organizationId: string;
+  projectId: string;
+  runId: string;
+  sessionToken: string;
+  apiUrl: string;
+  environmentConfigurationId: string;
+  environmentCheckId: string;
+  timeoutSeconds: number;
+  context: EnvironmentCheckContext;
+};
+
+/**
+ * Returns true when the process was launched for a hosted environment check.
+ * Detected by the presence of payload, session token, and environment check ID.
+ */
+export function isEnvironmentCheckMode(): boolean {
+  return (
+    isHostedRunnerMode() &&
+    Boolean(process.env[ENVIRONMENT_CHECK_ID_ENV_VAR]?.trim())
+  );
+}
+
+/**
+ * Parses the environment check configuration from the hosted runner payload
+ * and environment variables. The check context is extracted from the payload's
+ * environment field.
+ *
+ * Throws CliError if required variables are missing or the payload does not
+ * contain an environment configuration.
+ */
+export function resolveEnvironmentCheckConfig(): EnvironmentCheckConfig {
+  const hostedRunnerJobId = requireEnv(HOSTED_RUNNER_JOB_ID_ENV_VAR);
+  const organizationId = requireEnv(ORGANIZATION_ID_ENV_VAR);
+  const projectId = requireEnv(PROJECT_ID_ENV_VAR);
+  const runId = requireEnv(RUN_ID_ENV_VAR);
+  const sessionToken = requireEnv(RUNNER_SESSION_TOKEN_ENV_VAR);
+  const payloadJson = requireEnv(HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR);
+  const environmentCheckId = requireEnv(ENVIRONMENT_CHECK_ID_ENV_VAR);
+  const apiUrl = process.env[API_URL_ENV_VAR]?.trim() || DEFAULT_API_URL;
+  const environmentConfigurationId =
+    process.env[ENVIRONMENT_CONFIGURATION_ID_ENV_VAR]?.trim() || null;
+  const timeoutSeconds = parsePositiveInt(
+    ENVIRONMENT_CHECK_TIMEOUT_SECONDS_ENV_VAR,
+    30,
+  );
+
+  const payload = parsePayloadJson(payloadJson);
+  const environment = payload.environment;
+
+  if (!environment) {
+    throw new CliError(
+      "Environment check mode requires an environment configuration in the hosted runner payload.",
+      2,
+    );
+  }
+
+  const auth = environment.auth;
+  const authMode = typeof auth?.authMode === "number" ? auth.authMode : AuthMode.None;
+
+  const context: EnvironmentCheckContext = {
+    baseUrl: environment.baseUrl ?? "",
+    authMode,
+    loginUrl: auth?.loginUrl ?? null,
+    loginInstructions: auth?.loginInstructions ?? null,
+    username: auth?.username ?? null,
+    password: auth?.password ?? null,
+    postLoginVerificationHint: auth?.postLoginVerificationHint ?? null,
+    timeoutMs: timeoutSeconds * 1000,
+  };
+
+  return {
+    hostedRunnerJobId,
+    organizationId,
+    projectId,
+    runId,
+    sessionToken,
+    apiUrl: normalizeUrl(apiUrl),
+    environmentConfigurationId:
+      environmentConfigurationId ?? environment.environmentConfigurationId,
+    environmentCheckId,
+    timeoutSeconds,
+    context,
+  };
 }
 
 function normalizeUrl(value: string): string {

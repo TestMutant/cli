@@ -23,6 +23,10 @@ export type HostedRunnerCompleteRunResultResponse =
   components["schemas"]["HostedRunnerCompleteRunResultResponse"];
 export type HostedRunnerHeartbeatResponse =
   components["schemas"]["HostedRunnerHeartbeatResponse"];
+export type HostedRunnerArtifactUploadRequest =
+  components["schemas"]["HostedRunnerArtifactUploadRequest"];
+export type HostedRunnerArtifactUploadResponse =
+  components["schemas"]["HostedRunnerArtifactUploadResponse"];
 
 export type TestMutantApiClientOptions = {
   apiKey: string;
@@ -256,6 +260,18 @@ export class HostedRunnerApiClient {
     return this.postJson<HostedRunnerCompleteRunResultResponse>(
       `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/complete`,
       request,
+    );
+  }
+
+  async uploadArtifact(
+    projectId: string,
+    runId: string,
+    request: HostedRunnerArtifactUploadRequest,
+  ): Promise<HostedRunnerArtifactUploadResponse> {
+    return this.postJson<HostedRunnerArtifactUploadResponse>(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/artifacts`,
+      request,
+      201,
     );
   }
 
