@@ -1770,7 +1770,6 @@ function createHeartbeatMonitor(config, reporter, intervalMs) {
         )
       );
     }, delayMs);
-    tokenExpiryTimeout.unref?.();
   };
   const scheduleRunTimeout = () => {
     const delayMs = Math.max(1e-3, config.limits.runTimeoutSeconds) * 1e3;
@@ -1783,7 +1782,6 @@ function createHeartbeatMonitor(config, reporter, intervalMs) {
         )
       );
     }, delayMs);
-    runTimeout.unref?.();
   };
   const sendHeartbeat = async () => {
     const heartbeat = await reporter.heartbeat(config.projectId, config.runId);
@@ -1854,7 +1852,6 @@ function wait(ms, signal) {
   }
   return new Promise((resolve) => {
     const timeout = setTimeout(resolve, ms);
-    timeout.unref?.();
     signal.addEventListener(
       "abort",
       () => {
