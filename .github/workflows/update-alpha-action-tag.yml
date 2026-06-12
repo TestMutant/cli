@@ -59,4 +59,4 @@ jobs:
           git config user.email "testmutant-bot[bot]@users.noreply.github.com"
 
           git tag -f alpha "$GITHUB_SHA"
-          git push "https://x-access-token:${GH_APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" alpha --force
+          git -c core.hooksPath=/dev/null push "https://x-access-token:${GH_APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" +refs/tags/alpha:refs/tags/alpha

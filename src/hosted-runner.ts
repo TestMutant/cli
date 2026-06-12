@@ -331,7 +331,6 @@ function createHeartbeatMonitor(
         ),
       );
     }, delayMs);
-    tokenExpiryTimeout.unref?.();
   };
 
   const scheduleRunTimeout = (): void => {
@@ -345,7 +344,6 @@ function createHeartbeatMonitor(
         ),
       );
     }, delayMs);
-    runTimeout.unref?.();
   };
 
   const sendHeartbeat = async (): Promise<void> => {
@@ -424,7 +422,6 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 
   return new Promise((resolve) => {
     const timeout = setTimeout(resolve, ms);
-    timeout.unref?.();
 
     signal.addEventListener(
       "abort",
