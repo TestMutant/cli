@@ -591,11 +591,26 @@ var init_playwright_runner = __esm({
 var agent_runner_exports = {};
 __export(agent_runner_exports, {
   buildAgentWebSocketUrl: () => buildAgentWebSocketUrl,
+  buildHostedAgentWebSocketUrl: () => buildHostedAgentWebSocketUrl,
   runAgentGeneration: () => runAgentGeneration
 });
 function buildAgentWebSocketUrl(apiUrl, runId) {
   const url = new URL(
     `/api/cli/v1/runs/${encodeURIComponent(runId)}/agent/ws`,
+    apiUrl
+  );
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  } else {
+    throw new CliError(`Unsupported TestMutant API URL protocol: ${url.protocol}`);
+  }
+  return url.toString();
+}
+function buildHostedAgentWebSocketUrl(apiUrl, projectId, runId) {
+  const url = new URL(
+    `/api/cli/v1/hosted-runner/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/agent/ws`,
     apiUrl
   );
   if (url.protocol === "http:") {
@@ -617,7 +632,7 @@ async function runAgentGeneration(options) {
 }
 async function runAgentWebSocketLoop(options, browserDriver) {
   const webSocketFactory = options.webSocketFactory ?? createDefaultWebSocket;
-  const socket = webSocketFactory(buildAgentWebSocketUrl(options.apiUrl, options.runId), {
+  const socket = webSocketFactory(options.webSocketUrl ?? buildAgentWebSocketUrl(options.apiUrl, options.runId), {
     handshakeTimeout: options.timeoutMs,
     headers: {
       authorization: `Bearer ${options.apiKey}`,
@@ -1572,6 +1587,7 @@ async function executeAgentGenerationForApiCompletion(agentGenerator, options) {
 }
 
 // src/hosted-runner.ts
+init_agent_runner();
 init_playwright_runner();
 var ResultStatus = {
   Passed: 0,
@@ -1585,6 +1601,9 @@ var RunStatus = {
   Failed: 3,
   Cancelled: 4,
   TimedOut: 5
+};
+var RunKind = {
+  Generation: 2
 };
 var ArtifactKind = {
   Screenshot: 1,
@@ -1617,6 +1636,40 @@ async function runHostedRunner(config, options = {}) {
     resultReporter,
     options.heartbeatIntervalMs ?? 3e4
   );
+  if (isGenerationRun(config.payload.project?.runKind)) {
+    const agentGenerator = options.agentGenerator ?? runAgentGeneration;
+    let result;
+    try {
+      heartbeatMonitor.start();
+      result = await agentGenerator({
+        apiUrl: config.apiUrl,
+        apiKey: config.sessionToken,
+        timeoutMs: config.limits.runTimeoutSeconds * 1e3,
+        userAgent: "testmutant-hosted-runner",
+        runId: config.runId,
+        baseUrl,
+        webSocketUrl: buildHostedAgentWebSocketUrl(
+          config.apiUrl,
+          config.projectId,
+          config.runId
+        )
+      });
+      heartbeatMonitor.throwIfStopped();
+    } finally {
+      await heartbeatMonitor.stop();
+    }
+    const validationSummary = result.validationSummary;
+    return {
+      runId: config.runId,
+      projectId: config.projectId,
+      status: validationSummary && validationSummary.failed > 0 ? "Failed" : "Passed",
+      totalTests: validationSummary?.total ?? 0,
+      passedTests: validationSummary?.passed ?? 0,
+      failedTests: validationSummary?.failed ?? 0,
+      durationMs: 0,
+      artifactsUploaded: 0
+    };
+  }
   const startedAtUtc = (/* @__PURE__ */ new Date()).toISOString();
   let testSummary;
   try {
@@ -1727,6 +1780,9 @@ async function runHostedRunner(config, options = {}) {
     durationMs,
     artifactsUploaded
   };
+}
+function isGenerationRun(runKind) {
+  return runKind === RunKind.Generation || String(runKind).toLowerCase() === "generation";
 }
 function createHeartbeatMonitor(config, reporter, intervalMs) {
   const controller = new AbortController();

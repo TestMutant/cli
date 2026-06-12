@@ -1,5 +1,11 @@
 import type { HostedRunnerConfig, HostedRunnerTestDefinition } from "./hosted-runner-config";
 import {
+  buildHostedAgentWebSocketUrl,
+  runAgentGeneration,
+  type AgentGenerationResult,
+  type AgentRunnerOptions,
+} from "./agent-runner";
+import {
   HostedRunnerApiClient,
   type CliRunImplementation,
   type HostedRunnerArtifactUploadRequest,
@@ -31,6 +37,10 @@ const RunStatus = {
   TimedOut: 5,
 } as const;
 
+const RunKind = {
+  Generation: 2,
+} as const;
+
 // TestArtifactKind enum values (from API contract).
 const ArtifactKind = {
   Screenshot: 1,
@@ -56,6 +66,10 @@ export type HostedRunnerTestExecutor = (
   tests: CliRunImplementation[],
   options: PlaywrightExecutionOptions,
 ) => Promise<TestRunSummary>;
+
+export type HostedRunnerAgentGenerator = (
+  options: AgentRunnerOptions,
+) => Promise<AgentGenerationResult>;
 
 export type HostedRunnerResultReporter = {
   heartbeat(
@@ -86,6 +100,7 @@ export type HostedRunnerResultReporter = {
 
 export type HostedRunnerOptions = {
   testExecutor?: HostedRunnerTestExecutor;
+  agentGenerator?: HostedRunnerAgentGenerator;
   resultReporter?: HostedRunnerResultReporter;
   heartbeatIntervalMs?: number;
 };
@@ -132,6 +147,42 @@ export async function runHostedRunner(
     resultReporter,
     options.heartbeatIntervalMs ?? 30_000,
   );
+
+  if (isGenerationRun(config.payload.project?.runKind)) {
+    const agentGenerator = options.agentGenerator ?? runAgentGeneration;
+    let result: AgentGenerationResult;
+    try {
+      heartbeatMonitor.start();
+      result = await agentGenerator({
+        apiUrl: config.apiUrl,
+        apiKey: config.sessionToken,
+        timeoutMs: config.limits.runTimeoutSeconds * 1000,
+        userAgent: "testmutant-hosted-runner",
+        runId: config.runId,
+        baseUrl,
+        webSocketUrl: buildHostedAgentWebSocketUrl(
+          config.apiUrl,
+          config.projectId,
+          config.runId,
+        ),
+      });
+      heartbeatMonitor.throwIfStopped();
+    } finally {
+      await heartbeatMonitor.stop();
+    }
+
+    const validationSummary = result.validationSummary;
+    return {
+      runId: config.runId,
+      projectId: config.projectId,
+      status: validationSummary && validationSummary.failed > 0 ? "Failed" : "Passed",
+      totalTests: validationSummary?.total ?? 0,
+      passedTests: validationSummary?.passed ?? 0,
+      failedTests: validationSummary?.failed ?? 0,
+      durationMs: 0,
+      artifactsUploaded: 0,
+    };
+  }
 
   const startedAtUtc = new Date().toISOString();
   let testSummary: TestRunSummary;
@@ -272,6 +323,11 @@ export async function runHostedRunner(
     durationMs,
     artifactsUploaded,
   };
+}
+
+function isGenerationRun(runKind: unknown): boolean {
+  return runKind === RunKind.Generation
+    || String(runKind).toLowerCase() === "generation";
 }
 
 function createHeartbeatMonitor(
