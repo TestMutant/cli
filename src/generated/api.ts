@@ -100,10 +100,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cli/v1/hosted-runner/projects/{projectId}/runs/{runId}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_HostedRunnerHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/hosted-runner/projects/{projectId}/runs/{runId}/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_HostedRunnerUploadArtifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/hosted-runner/projects/{projectId}/runs/{runId}/results/{implementationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_HostedRunnerReportTestResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli/v1/hosted-runner/projects/{projectId}/runs/{runId}/results/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CliV1_HostedRunnerCompleteRunResults"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ApiErrorResponse: {
+            error: string;
+        };
         CliCompleteRunRequest: {
             status: null | string;
             summary: null | string;
@@ -165,6 +232,7 @@ export interface components {
             /** Format: uuid */
             testSpecId: null | string;
             implementations: components["schemas"]["CliRunImplementation"][];
+            runner: components["schemas"]["HostedRunnerPayload"];
         };
         CliRunDetailResponse: {
             /** Format: uuid */
@@ -211,11 +279,219 @@ export interface components {
         CliTestResult: {
             /** Format: uuid */
             implementationId: string;
-            passed: boolean;
+            status: components["schemas"]["RunImplementationResultStatus"];
             /** Format: int32 */
             durationMs: null | number | string;
             errorMessage: null | string;
             stackTrace: null | string;
+            environmentUrl?: null | string;
+            /** Format: date-time */
+            startedAtUtc?: null | string;
+            /** Format: date-time */
+            completedAtUtc?: null | string;
+            failureClassification?: null | components["schemas"]["FailureClassification"];
+            outputJson?: null | string;
+        };
+        FailureClassification: number;
+        GeneratedTestLifecycleStatus: number;
+        HostedRunnerArtifactUploadInstructions: {
+            /** Format: int64 */
+            maxArtifactSizeBytes: number | string;
+            callbackBasePath: string;
+            heartbeatPath: string;
+            screenshotPathTemplate: string;
+        };
+        HostedRunnerArtifactUploadRequest: {
+            kind: components["schemas"]["TestArtifactKind"];
+            fileName: null | string;
+            contentType: null | string;
+            contentBase64: null | string;
+            /** Format: uuid */
+            runImplementationResultId?: null | string;
+            /** Format: uuid */
+            validationAttemptId?: null | string;
+            metadataJson?: null | string;
+        };
+        HostedRunnerArtifactUploadResponse: {
+            /** Format: uuid */
+            artifactId: string;
+            kind: components["schemas"]["TestArtifactKind"];
+            fileName: null | string;
+            contentType: null | string;
+            /** Format: int64 */
+            sizeBytes: number | string;
+            sha256: null | string;
+            /** Format: date-time */
+            retainUntilUtc: null | string;
+            /** Format: date-time */
+            createdAtUtc: string;
+        };
+        HostedRunnerAuthInstructions: {
+            authMode: components["schemas"]["ProjectEnvironmentAuthMode"];
+            loginUrl: null | string;
+            loginInstructions: null | string;
+            postLoginVerificationHint: null | string;
+            credentialPreview: null | string;
+            hasCredentials: boolean;
+            username: null | string;
+            password: null | string;
+        };
+        HostedRunnerCompleteRunResultRequest: {
+            status: components["schemas"]["RunStatus"];
+            summary?: null | string;
+            errorMessage?: null | string;
+            /** Format: int32 */
+            totalTests?: null | number | string;
+            /** Format: int32 */
+            passedTests?: null | number | string;
+            /** Format: int32 */
+            failedTests?: null | number | string;
+            /** Format: int32 */
+            skippedTests?: null | number | string;
+            /** Format: int32 */
+            durationMs?: null | number | string;
+            environmentUrl?: null | string;
+            /** Format: date-time */
+            startedAtUtc?: null | string;
+            /** Format: date-time */
+            completedAtUtc?: null | string;
+            failureClassification?: null | components["schemas"]["FailureClassification"];
+        };
+        HostedRunnerCompleteRunResultResponse: {
+            ok: boolean;
+            /** Format: uuid */
+            runId: string;
+            status: components["schemas"]["RunStatus"];
+            /** Format: int32 */
+            totalTests: number | string;
+            /** Format: int32 */
+            passedTests: number | string;
+            /** Format: int32 */
+            failedTests: number | string;
+            /** Format: int32 */
+            skippedTests: number | string;
+            /** Format: int32 */
+            durationMs: null | number | string;
+            failureClassification: components["schemas"]["FailureClassification"];
+            /** Format: date-time */
+            completedAtUtc: null | string;
+        };
+        HostedRunnerEnvironmentContext: {
+            /** Format: uuid */
+            environmentConfigurationId: string;
+            name: string;
+            baseUrl: string;
+            timeZoneId: string;
+            testDataNotes: null | string;
+            requiresPassingEnvironmentCheck: boolean;
+            /** Format: date-time */
+            environmentCheckSkippedAtUtc: null | string;
+            auth: components["schemas"]["HostedRunnerAuthInstructions"];
+        };
+        HostedRunnerHeartbeatResponse: {
+            ok: boolean;
+            /** Format: uuid */
+            organizationId: string;
+            /** Format: uuid */
+            projectId: string;
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            hostedRunnerJobId: string;
+            /** Format: date-time */
+            lastHeartbeatAtUtc: string;
+            /** Format: date-time */
+            expiresAtUtc: string;
+        };
+        HostedRunnerLimits: {
+            /** Format: int32 */
+            runTimeoutSeconds: number | string;
+            /** Format: int32 */
+            perTestTimeoutSeconds: number | string;
+            /** Format: int32 */
+            maxTestsPerRun: number | string;
+            /** Format: int64 */
+            maxArtifactSizeBytes: number | string;
+            /** Format: int32 */
+            maxRepairAttempts: number | string;
+        };
+        HostedRunnerPayload: {
+            project: components["schemas"]["HostedRunnerProjectContext"];
+            environment: null | components["schemas"]["HostedRunnerEnvironmentContext"];
+            testSource: components["schemas"]["HostedRunnerTestSource"];
+            limits: components["schemas"]["HostedRunnerLimits"];
+            artifactUploads: components["schemas"]["HostedRunnerArtifactUploadInstructions"];
+        };
+        HostedRunnerProjectContext: {
+            /** Format: uuid */
+            organizationId: string;
+            organizationName: null | string;
+            /** Format: uuid */
+            projectId: string;
+            projectName: string;
+            /** Format: uuid */
+            runId: string;
+            runKind: components["schemas"]["RunKind"];
+            repositoryFullName: null | string;
+            baseUrl: null | string;
+            environmentName: null | string;
+        };
+        HostedRunnerTestDefinition: {
+            /** Format: uuid */
+            implementationId: string;
+            /** Format: uuid */
+            testSpecId: string;
+            /** Format: uuid */
+            requirementId: null | string;
+            specTitle: null | string;
+            testLayer: string;
+            runnerKind: string;
+            name: string;
+            description: null | string;
+            source: string;
+            targetPath: null | string;
+            status: components["schemas"]["ImplementationStatus"];
+            lifecycleStatus: components["schemas"]["GeneratedTestLifecycleStatus"];
+            implementationSource: components["schemas"]["ImplementationSource"];
+        };
+        HostedRunnerTestResultRequest: {
+            status: components["schemas"]["RunImplementationResultStatus"];
+            /** Format: int32 */
+            durationMs?: null | number | string;
+            environmentUrl?: null | string;
+            /** Format: date-time */
+            startedAtUtc?: null | string;
+            /** Format: date-time */
+            completedAtUtc?: null | string;
+            failureClassification?: null | components["schemas"]["FailureClassification"];
+            errorMessage?: null | string;
+            stackTrace?: null | string;
+            outputJson?: null | string;
+        };
+        HostedRunnerTestResultResponse: {
+            /** Format: uuid */
+            resultId: string;
+            /** Format: uuid */
+            runId: string;
+            /** Format: uuid */
+            testImplementationId: string;
+            /** Format: uuid */
+            testSpecId: string;
+            status: components["schemas"]["RunImplementationResultStatus"];
+            /** Format: int32 */
+            durationMs: null | number | string;
+            environmentUrl: null | string;
+            /** Format: date-time */
+            startedAtUtc: null | string;
+            /** Format: date-time */
+            completedAtUtc: null | string;
+            failureClassification: components["schemas"]["FailureClassification"];
+            /** Format: date-time */
+            createdAtUtc: string;
+        };
+        HostedRunnerTestSource: {
+            sourceKind: string;
+            tests: components["schemas"]["HostedRunnerTestDefinition"][];
         };
         HttpValidationProblemDetails: {
             type?: null | string;
@@ -230,6 +506,8 @@ export interface components {
         };
         /** Format: binary */
         IFormFile: string;
+        ImplementationSource: number;
+        ImplementationStatus: number;
         ProblemDetails: {
             type?: null | string;
             title?: null | string;
@@ -238,8 +516,11 @@ export interface components {
             detail?: null | string;
             instance?: null | string;
         };
+        ProjectEnvironmentAuthMode: number;
+        RunImplementationResultStatus: number;
         RunKind: number;
         RunStatus: number;
+        TestArtifactKind: number;
     };
     responses: never;
     parameters: never;
@@ -495,6 +776,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
             /** @description Unauthorized */
             401: {
                 headers: {
@@ -510,6 +800,175 @@ export interface operations {
                 content: {
                     "application/problem+json": components["schemas"]["ProblemDetails"];
                 };
+            };
+        };
+    };
+    CliV1_HostedRunnerHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostedRunnerHeartbeatResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    CliV1_HostedRunnerUploadArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostedRunnerArtifactUploadRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostedRunnerArtifactUploadResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Payload Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+        };
+    };
+    CliV1_HostedRunnerReportTestResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+                runId: string;
+                implementationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostedRunnerTestResultRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostedRunnerTestResultResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    CliV1_HostedRunnerCompleteRunResults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                projectId: string;
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostedRunnerCompleteRunResultRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostedRunnerCompleteRunResultResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
