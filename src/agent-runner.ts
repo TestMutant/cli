@@ -2,7 +2,11 @@ import { chromium, type Browser, type Page } from "playwright";
 import { CliError } from "./config";
 import { ensurePlaywrightBrowserInstalled } from "./playwright-install";
 import WebSocket from "ws";
-import { runPlaywrightTests, type TestRunSummary } from "./playwright-runner";
+import {
+  runPlaywrightTests,
+  type TestRunResult,
+  type TestRunSummary,
+} from "./playwright-runner";
 import type { CliRunImplementation } from "./api-client";
 
 const SUPPORTED_TOOLS = new Set([
@@ -336,7 +340,7 @@ async function createDirectPlaywrightDriver(
               failed: summary.failed,
               baseUrl: summary.baseUrl,
             },
-            tests: summary.tests,
+            tests: summary.tests.map(toValidationTestResult),
             failureExcerpt:
               summary.tests.find((test) => test.status === "Failed")?.errorMessage ?? null,
           };
@@ -454,8 +458,18 @@ function parseValidationSummary(value: unknown): TestRunSummary | null {
     tests: summary.tests
       .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
       .map((item) => ({
-        implementationId: typeof item.implementationId === "string" ? item.implementationId : "",
-        runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : "",
+        implementationId:
+          typeof item.implementationId === "string"
+            ? item.implementationId
+            : typeof item.testId === "string"
+              ? item.testId
+              : "",
+        runnerKind:
+          typeof item.runnerKind === "string"
+            ? item.runnerKind
+            : typeof item.type === "string"
+              ? item.type
+              : "",
         name: typeof item.name === "string" ? item.name : "",
         status: item.status === "Passed" ? "Passed" : "Failed",
         errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
@@ -464,6 +478,19 @@ function parseValidationSummary(value: unknown): TestRunSummary | null {
         traceBuffer: null,
         videoBuffer: null,
       })),
+  };
+}
+
+function toValidationTestResult(test: TestRunResult): Record<string, unknown> {
+  return {
+    testId: test.implementationId,
+    implementationId: test.implementationId,
+    type: test.runnerKind,
+    runnerKind: test.runnerKind,
+    name: test.name,
+    status: test.status,
+    errorMessage: test.errorMessage,
+    durationMs: test.durationMs,
   };
 }
 

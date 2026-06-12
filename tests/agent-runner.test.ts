@@ -140,7 +140,9 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
           },
           tests: [
             {
+              testId: "generated-draft",
               implementationId: "generated-draft",
+              type: "playwright",
               runnerKind: "playwright",
               name: "Generated requirement test",
               status: "Passed",
@@ -183,7 +185,9 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
       },
       tests: [
         {
+          testId: "generated-draft",
           implementationId: "generated-draft",
+          type: "playwright",
           runnerKind: "playwright",
           name: "Generated requirement test",
           status: "Passed",
@@ -209,8 +213,8 @@ test("runAgentGeneration executes playwright_validate_test locally", async () =>
       failed: 0,
       tests: [
         {
-          implementationId: "generated-draft",
-          runnerKind: "playwright",
+          testId: "generated-draft",
+          type: "playwright",
           name: "Generated requirement test",
           status: "Passed",
           errorMessage: null,

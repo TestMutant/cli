@@ -109,6 +109,8 @@ function createMockReporter(): HostedRunnerResultReporter & {
   const testResults: ReportedTestResult[] = [];
   const completions: ReportedCompletion[] = [];
   const artifacts: UploadedArtifact[] = [];
+  const resultIds = new Map<string, string>();
+  const validationAttemptIds = new Map<string, string>();
   let resultCounter = 0;
   let artifactCounter = 0;
 
@@ -118,8 +120,17 @@ function createMockReporter(): HostedRunnerResultReporter & {
     artifacts,
     async reportTestResult(projectId, runId, implementationId, request) {
       testResults.push({ projectId, runId, implementationId, request });
-      resultCounter += 1;
-      return { resultId: `result-${resultCounter}` };
+
+      if (!resultIds.has(implementationId)) {
+        resultCounter += 1;
+        resultIds.set(implementationId, `result-${resultCounter}`);
+        validationAttemptIds.set(implementationId, `attempt-${resultCounter}`);
+      }
+
+      return {
+        resultId: resultIds.get(implementationId) ?? null,
+        validationAttemptId: validationAttemptIds.get(implementationId) ?? null,
+      };
     },
     async completeRunResults(projectId, runId, request) {
       completions.push({ projectId, runId, request });
@@ -127,7 +138,11 @@ function createMockReporter(): HostedRunnerResultReporter & {
     async uploadArtifact(projectId, runId, request) {
       artifacts.push({ projectId, runId, request });
       artifactCounter += 1;
-      return { artifactId: `artifact-${artifactCounter}` };
+      return {
+        artifactId: `artifact-${artifactCounter}`,
+        fileName: request.fileName ?? null,
+        contentType: request.contentType ?? null,
+      };
     },
   };
 }
@@ -238,6 +253,70 @@ test("runHostedRunner reports failure when tests fail", async () => {
   // Verify run was completed as Failed.
   assert.equal(reporter.completions[0]!.request.status, 3); // Failed
   assert.ok((reporter.completions[0]!.request.errorMessage as string).includes("1 test failed"));
+});
+
+test("runHostedRunner normalizes repair feedback and hands validation attempts to artifacts", async () => {
+  const config = buildConfig();
+  const reporter = createMockReporter();
+
+  const executor: HostedRunnerTestExecutor = async () => ({
+    kind: "playwright",
+    baseUrl: "https://staging.example.test",
+    total: 1,
+    passed: 0,
+    failed: 1,
+    tests: [
+      {
+        implementationId: "dddd0000-dddd-dddd-dddd-dddddddddddd",
+        runnerKind: "playwright",
+        name: "login page loads",
+        status: "Failed",
+        errorMessage: "Expected heading to be visible",
+        durationMs: 500,
+        screenshotBuffer: Buffer.from("screenshot-data"),
+        traceBuffer: Buffer.from("trace-data"),
+        videoBuffer: null,
+        repairFeedback: {
+          consoleLogs: ["stdout: console.error: timeout"],
+          browserObservations: ["goto /login", "expect heading to be visible"],
+        },
+      },
+    ],
+  });
+
+  await runHostedRunner(config, {
+    testExecutor: executor,
+    resultReporter: reporter,
+  });
+
+  assert.equal(reporter.testResults.length, 2);
+  assert.equal(reporter.artifacts.length, 2);
+  assert.equal(reporter.artifacts[0]!.request.validationAttemptId, "attempt-1");
+  assert.equal(reporter.artifacts[1]!.request.validationAttemptId, "attempt-1");
+
+  const outputJson = reporter.testResults[1]!.request.outputJson;
+  assert.ok(outputJson);
+  assert.deepEqual(JSON.parse(outputJson as string), {
+    errorMessage: "Expected heading to be visible",
+    screenshotReference: {
+      artifactId: "artifact-1",
+      validationAttemptId: "attempt-1",
+      fileName: "dddd0000-dddd-dddd-dddd-dddddddddddd-screenshot.png",
+      contentType: "image/png",
+      uploaded: true,
+    },
+    traceSummary: {
+      artifactId: "artifact-2",
+      validationAttemptId: "attempt-1",
+      fileName: "dddd0000-dddd-dddd-dddd-dddddddddddd-trace.zip",
+      contentType: "application/zip",
+      uploaded: true,
+      summary:
+        "Playwright trace uploaded as dddd0000-dddd-dddd-dddd-dddddddddddd-trace.zip.",
+    },
+    consoleLogs: ["stdout: console.error: timeout"],
+    browserObservations: ["goto /login", "expect heading to be visible"],
+  });
 });
 
 test("runHostedRunner handles executor crash gracefully", async () => {
@@ -416,7 +495,7 @@ test("runHostedRunner per-test reporting failure does not prevent run completion
       completions.push({ projectId, runId, request });
     },
     async uploadArtifact() {
-      return { artifactId: null };
+      return { artifactId: null, fileName: null, contentType: null };
     },
   };
 
@@ -777,7 +856,7 @@ test("runHostedRunner artifact upload failure does not fail the run", async () =
 
   const reporter: HostedRunnerResultReporter = {
     async reportTestResult() {
-      return { resultId: "result-1" };
+      return { resultId: "result-1", validationAttemptId: "attempt-1" };
     },
     async completeRunResults(projectId, runId, request) {
       completions.push({ projectId, runId, request });

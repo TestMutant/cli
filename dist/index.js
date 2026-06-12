@@ -139,7 +139,9 @@ async function runPlaywrightTests(tests, options = {}) {
     status: "Failed",
     errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
     durationMs: null,
-    screenshotBuffer: null
+    screenshotBuffer: null,
+    traceBuffer: null,
+    videoBuffer: null
   }));
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
@@ -149,7 +151,7 @@ async function runPlaywrightTests(tests, options = {}) {
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
       supported,
-      options.baseUrl ?? null
+      options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
     await ensurePlaywrightBrowserInstalled();
@@ -164,7 +166,12 @@ async function runPlaywrightTests(tests, options = {}) {
         }
       }
     );
-    const mappedResults = await mapPlaywrightResults(writtenTests, result, workDir);
+    const mappedResults = await mapPlaywrightResults(
+      writtenTests,
+      result,
+      workDir,
+      options.captureRepairFeedback === true
+    );
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
       ...unsupportedResults
@@ -176,16 +183,22 @@ async function runPlaywrightTests(tests, options = {}) {
 function isPlaywrightTest(test) {
   return test.runnerKind.trim().toLowerCase() === PLAYWRIGHT_TYPE;
 }
-async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
+async function writePlaywrightWorkspace(workDir, tests, options) {
+  const baseUrl = options.baseUrl ?? null;
+  const perTestTimeoutMs = options.perTestTimeoutMs ?? 3e4;
+  const traceMode = options.traceMode ?? "off";
+  const videoMode = options.videoMode ?? "off";
   await (0, import_promises.writeFile)(
     (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
-      "  timeout: 30000,",
+      `  timeout: ${perTestTimeoutMs},`,
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
       "    screenshot: 'only-on-failure',",
+      `    trace: '${traceMode}',`,
+      `    video: '${videoMode}',`,
       "  },",
       `  outputDir: './test-results',`,
       "};",
@@ -205,13 +218,19 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   }
   return writtenTests;
 }
-async function mapPlaywrightResults(writtenTests, commandResult, workDir) {
+async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback) {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = /* @__PURE__ */ new Map();
   const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
   if (report) {
     for (const suite of report.suites ?? []) {
-      await collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
+      await collectSuiteResults(
+        suite,
+        writtenTests,
+        fileResults,
+        fallbackError,
+        captureRepairFeedback
+      );
     }
   }
   return writtenTests.map(({ test, fileName }) => {
@@ -226,11 +245,13 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir) {
       status: commandResult.exitCode === 0 ? "Passed" : "Failed",
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
       durationMs: null,
-      screenshotBuffer: null
+      screenshotBuffer: null,
+      traceBuffer: null,
+      videoBuffer: null
     };
   });
 }
-async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
+async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback) {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
   if (writtenTest && fileName) {
@@ -242,9 +263,14 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
     );
     const isFailed = Boolean(failedSpec || failedCase);
     let screenshotBuffer = null;
+    let traceBuffer = null;
+    let videoBuffer = null;
     if (isFailed && result) {
       screenshotBuffer = await readScreenshotAttachment(result);
+      traceBuffer = await readAttachmentByName(result, "trace");
+      videoBuffer = await readAttachmentByName(result, "video");
     }
+    const repairFeedback = captureRepairFeedback && isFailed ? extractRepairFeedback(failedSpec, result) : void 0;
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
@@ -252,16 +278,28 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       status: isFailed ? "Failed" : "Passed",
       errorMessage: isFailed ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
       durationMs: sumDurations(specs),
-      screenshotBuffer
+      screenshotBuffer,
+      traceBuffer,
+      videoBuffer,
+      ...repairFeedback ? { repairFeedback } : {}
     });
   }
   for (const child of suite.suites ?? []) {
-    await collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+    await collectSuiteResults(
+      child,
+      writtenTests,
+      fileResults,
+      fallbackError,
+      captureRepairFeedback
+    );
   }
 }
 async function readScreenshotAttachment(result) {
+  return readAttachmentByName(result, "screenshot");
+}
+async function readAttachmentByName(result, name) {
   const attachment = result.attachments?.find(
-    (a) => a.name === "screenshot" && a.path
+    (a) => a.name === name && a.path
   );
   if (!attachment?.path) {
     return null;
@@ -298,6 +336,92 @@ function formatError(error) {
 function sumDurations(specs) {
   const duration = specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).reduce((total, result) => total + (result.duration ?? 0), 0);
   return duration > 0 ? duration : null;
+}
+function extractRepairFeedback(spec, result) {
+  if (!result) {
+    return void 0;
+  }
+  const consoleLogs = normalizeFeedbackLines([
+    ...readIoEntries(result.stdout, "stdout"),
+    ...readIoEntries(result.stderr, "stderr")
+  ]);
+  const browserObservations = normalizeFeedbackLines([
+    spec?.title ? `Test: ${spec.title}` : null,
+    ...collectStepObservations(result.steps)
+  ]);
+  if (consoleLogs.length === 0 && browserObservations.length === 0) {
+    return void 0;
+  }
+  return {
+    consoleLogs,
+    browserObservations
+  };
+}
+function readIoEntries(entries, stream) {
+  const lines = [];
+  for (const entry of entries ?? []) {
+    const text = readIoEntryText(entry);
+    if (!text) {
+      continue;
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed) {
+        lines.push(`${stream}: ${trimmed}`);
+      }
+    }
+  }
+  return lines;
+}
+function readIoEntryText(entry) {
+  if (typeof entry === "string") {
+    return entry;
+  }
+  if (entry && typeof entry === "object") {
+    if (typeof entry.text === "string") {
+      return entry.text;
+    }
+    if (typeof entry.message === "string") {
+      return entry.message;
+    }
+    if (typeof entry.buffer === "string") {
+      try {
+        return Buffer.from(entry.buffer, "base64").toString("utf8");
+      } catch {
+        return entry.buffer;
+      }
+    }
+  }
+  return null;
+}
+function collectStepObservations(steps) {
+  const observations = [];
+  for (const step of steps ?? []) {
+    const title = firstNonEmpty(step.title);
+    const error = step.error ? formatError(step.error) : null;
+    if (title && error) {
+      observations.push(`${title}: ${error}`);
+    } else if (title) {
+      observations.push(title);
+    } else if (error) {
+      observations.push(error);
+    }
+    observations.push(...collectStepObservations(step.steps));
+  }
+  return observations;
+}
+function normalizeFeedbackLines(values) {
+  const normalized = /* @__PURE__ */ new Set();
+  for (const value of values) {
+    const text = firstNonEmpty(value);
+    if (text) {
+      normalized.add(truncate2(text, 300));
+    }
+    if (normalized.size >= 20) {
+      break;
+    }
+  }
+  return [...normalized];
 }
 function summarize(baseUrl, tests) {
   const passed = tests.filter((test) => test.status === "Passed").length;
@@ -645,7 +769,7 @@ async function createDirectPlaywrightDriver(baseUrl) {
               failed: summary.failed,
               baseUrl: summary.baseUrl
             },
-            tests: summary.tests,
+            tests: summary.tests.map(toValidationTestResult),
             failureExcerpt: summary.tests.find((test) => test.status === "Failed")?.errorMessage ?? null
           };
         }
@@ -719,14 +843,28 @@ function parseValidationSummary(value) {
     passed: summary.passed,
     failed: summary.failed,
     tests: summary.tests.filter((item) => Boolean(item && typeof item === "object")).map((item) => ({
-      implementationId: typeof item.implementationId === "string" ? item.implementationId : "",
-      runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : "",
+      implementationId: typeof item.implementationId === "string" ? item.implementationId : typeof item.testId === "string" ? item.testId : "",
+      runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : typeof item.type === "string" ? item.type : "",
       name: typeof item.name === "string" ? item.name : "",
       status: item.status === "Passed" ? "Passed" : "Failed",
       errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
       durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
-      screenshotBuffer: null
+      screenshotBuffer: null,
+      traceBuffer: null,
+      videoBuffer: null
     }))
+  };
+}
+function toValidationTestResult(test) {
+  return {
+    testId: test.implementationId,
+    implementationId: test.implementationId,
+    type: test.runnerKind,
+    runnerKind: test.runnerKind,
+    name: test.name,
+    status: test.status,
+    errorMessage: test.errorMessage,
+    durationMs: test.durationMs
   };
 }
 function normalizeArguments(value) {
@@ -958,6 +1096,13 @@ var HostedRunnerApiClient = class {
     return this.postJson(
       `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/complete`,
       request
+    );
+  }
+  async uploadArtifact(projectId, runId, request) {
+    return this.postJson(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/artifacts`,
+      request,
+      201
     );
   }
   async postJson(path, body, expectedStatus = 200) {
@@ -1369,7 +1514,9 @@ async function executeTestsForApiCompletion(testExecutor, implementations, baseU
         status: "Failed",
         errorMessage: message,
         durationMs: null,
-        screenshotBuffer: null
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null
       }))
     };
   }
@@ -1403,23 +1550,71 @@ var RunStatus = {
   Cancelled: 4,
   TimedOut: 5
 };
+var ArtifactKind = {
+  Screenshot: 1,
+  Trace: 2,
+  Video: 3,
+  Log: 4,
+  Console: 5,
+  NetworkSummary: 6
+};
 async function runHostedRunner(config, options = {}) {
   const testDefinitions = config.payload.testSource?.tests ?? [];
   const implementations = testDefinitions.map(toCliRunImplementation);
   const baseUrl = config.payload.project?.baseUrl ?? config.payload.environment?.baseUrl ?? null;
   const perTestTimeoutMs = config.limits.perTestTimeoutSeconds * 1e3;
+  const maxArtifactSizeBytes = config.limits.maxArtifactSizeBytes;
   const testExecutor = options.testExecutor ?? runPlaywrightTests;
   const resultReporter = options.resultReporter ?? createDefaultResultReporter(config);
-  const testSummary = await executeTests(testExecutor, implementations, baseUrl, perTestTimeoutMs);
+  const startedAtUtc = (/* @__PURE__ */ new Date()).toISOString();
+  const testSummary = await executeTests(testExecutor, implementations, {
+    baseUrl,
+    perTestTimeoutMs,
+    traceMode: "retain-on-failure",
+    videoMode: "retain-on-failure",
+    captureRepairFeedback: true
+  });
+  const completedAtUtc = (/* @__PURE__ */ new Date()).toISOString();
+  const durationMs = new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
+  let artifactsUploaded = 0;
   for (const test of testSummary.tests) {
     const resultStatus = test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
-    await resultReporter.reportTestResult(config.projectId, config.runId, test.implementationId, {
-      status: resultStatus,
-      durationMs: test.durationMs,
-      errorMessage: test.errorMessage,
-      environmentUrl: baseUrl
-    }).catch(() => {
-    });
+    const initialOutputJson = buildRepairFeedbackOutput(test, null, null);
+    const baseRequest = buildTestResultRequest(
+      resultStatus,
+      baseUrl,
+      startedAtUtc,
+      completedAtUtc,
+      test,
+      initialOutputJson
+    );
+    const { resultId, validationAttemptId } = await resultReporter.reportTestResult(
+      config.projectId,
+      config.runId,
+      test.implementationId,
+      baseRequest
+    ).catch(() => ({ resultId: null, validationAttemptId: null }));
+    const artifactUploads = await uploadTestArtifacts(
+      resultReporter,
+      config.projectId,
+      config.runId,
+      resultId,
+      validationAttemptId,
+      test,
+      maxArtifactSizeBytes
+    );
+    artifactsUploaded += artifactUploads.uploadedCount;
+    const finalOutputJson = buildRepairFeedbackOutput(
+      test,
+      artifactUploads,
+      validationAttemptId
+    );
+    if (finalOutputJson && finalOutputJson !== initialOutputJson) {
+      await resultReporter.reportTestResult(config.projectId, config.runId, test.implementationId, {
+        ...baseRequest,
+        outputJson: finalOutputJson
+      }).catch(() => ({ resultId: null, validationAttemptId: null }));
+    }
   }
   const passed = testSummary.failed === 0 && testSummary.total > 0;
   const runStatus = passed ? RunStatus.Completed : RunStatus.Failed;
@@ -1430,7 +1625,10 @@ async function runHostedRunner(config, options = {}) {
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
     failedTests: testSummary.failed,
-    environmentUrl: baseUrl
+    durationMs,
+    environmentUrl: baseUrl,
+    startedAtUtc,
+    completedAtUtc
   });
   return {
     runId: config.runId,
@@ -1438,7 +1636,9 @@ async function runHostedRunner(config, options = {}) {
     status: passed ? "Passed" : "Failed",
     totalTests: testSummary.total,
     passedTests: testSummary.passed,
-    failedTests: testSummary.failed
+    failedTests: testSummary.failed,
+    durationMs,
+    artifactsUploaded
   };
 }
 function toCliRunImplementation(test) {
@@ -1451,11 +1651,11 @@ function toCliRunImplementation(test) {
     source: test.source
   };
 }
-async function executeTests(testExecutor, implementations, baseUrl, _perTestTimeoutMs) {
+async function executeTests(testExecutor, implementations, options) {
   if (implementations.length === 0) {
     return {
       kind: "playwright",
-      baseUrl,
+      baseUrl: options.baseUrl,
       total: 0,
       passed: 0,
       failed: 0,
@@ -1463,12 +1663,18 @@ async function executeTests(testExecutor, implementations, baseUrl, _perTestTime
     };
   }
   try {
-    return await testExecutor(implementations, { baseUrl });
+    return await testExecutor(implementations, {
+      baseUrl: options.baseUrl,
+      perTestTimeoutMs: options.perTestTimeoutMs,
+      traceMode: options.traceMode,
+      videoMode: options.videoMode,
+      captureRepairFeedback: options.captureRepairFeedback
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
       kind: "playwright",
-      baseUrl,
+      baseUrl: options.baseUrl,
       total: implementations.length,
       passed: 0,
       failed: implementations.length,
@@ -1479,10 +1685,166 @@ async function executeTests(testExecutor, implementations, baseUrl, _perTestTime
         status: "Failed",
         errorMessage: message,
         durationMs: null,
-        screenshotBuffer: null
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null
       }))
     };
   }
+}
+async function uploadTestArtifacts(reporter, projectId, runId, resultId, validationAttemptId, test, maxArtifactSizeBytes) {
+  const artifacts = [];
+  if (test.screenshotBuffer) {
+    artifacts.push({
+      key: "screenshot",
+      kind: ArtifactKind.Screenshot,
+      fileName: `${safeFilePart2(test.implementationId)}-screenshot.png`,
+      contentType: "image/png",
+      buffer: test.screenshotBuffer
+    });
+  }
+  if (test.traceBuffer) {
+    artifacts.push({
+      key: "trace",
+      kind: ArtifactKind.Trace,
+      fileName: `${safeFilePart2(test.implementationId)}-trace.zip`,
+      contentType: "application/zip",
+      buffer: test.traceBuffer
+    });
+  }
+  if (test.videoBuffer) {
+    artifacts.push({
+      key: "video",
+      kind: ArtifactKind.Video,
+      fileName: `${safeFilePart2(test.implementationId)}-video.webm`,
+      contentType: "video/webm",
+      buffer: test.videoBuffer
+    });
+  }
+  let uploaded = 0;
+  const references = {
+    uploadedCount: 0,
+    screenshot: null,
+    trace: null,
+    video: null
+  };
+  for (const artifact of artifacts) {
+    if (artifact.buffer.byteLength > maxArtifactSizeBytes) {
+      references[artifact.key] = {
+        artifactId: null,
+        fileName: artifact.fileName,
+        contentType: artifact.contentType
+      };
+      continue;
+    }
+    const response = await reporter.uploadArtifact(projectId, runId, {
+      kind: artifact.kind,
+      fileName: artifact.fileName,
+      contentType: artifact.contentType,
+      contentBase64: artifact.buffer.toString("base64"),
+      runImplementationResultId: resultId,
+      validationAttemptId
+    }).catch(() => ({
+      artifactId: null,
+      fileName: artifact.fileName,
+      contentType: artifact.contentType
+    }));
+    references[artifact.key] = {
+      artifactId: response.artifactId,
+      fileName: response.fileName ?? artifact.fileName,
+      contentType: response.contentType ?? artifact.contentType
+    };
+    if (response.artifactId) {
+      uploaded += 1;
+    }
+  }
+  return {
+    ...references,
+    uploadedCount: uploaded
+  };
+}
+function safeFilePart2(value) {
+  return value.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
+}
+function buildTestResultRequest(resultStatus, baseUrl, startedAtUtc, completedAtUtc, test, outputJson) {
+  return {
+    status: resultStatus,
+    durationMs: test.durationMs,
+    errorMessage: test.errorMessage,
+    environmentUrl: baseUrl,
+    startedAtUtc,
+    completedAtUtc,
+    outputJson
+  };
+}
+function buildRepairFeedbackOutput(test, uploads, validationAttemptId) {
+  if (test.status !== "Failed") {
+    return null;
+  }
+  const consoleLogs = normalizeFeedbackEntries(test.repairFeedback?.consoleLogs);
+  const browserObservations = normalizeFeedbackEntries(
+    test.repairFeedback?.browserObservations
+  );
+  const screenshotReference = buildArtifactReference(
+    uploads?.screenshot ?? (test.screenshotBuffer ? defaultArtifactReference(test, "screenshot") : null),
+    validationAttemptId
+  );
+  const traceSummary = buildTraceSummary(
+    uploads?.trace ?? (test.traceBuffer ? defaultArtifactReference(test, "trace") : null),
+    validationAttemptId
+  );
+  if (!test.errorMessage && !screenshotReference && !traceSummary && consoleLogs.length === 0 && browserObservations.length === 0) {
+    return null;
+  }
+  return JSON.stringify({
+    errorMessage: test.errorMessage,
+    screenshotReference,
+    traceSummary,
+    consoleLogs,
+    browserObservations
+  });
+}
+function buildArtifactReference(reference, validationAttemptId) {
+  if (!reference) {
+    return null;
+  }
+  return {
+    artifactId: reference.artifactId,
+    validationAttemptId,
+    fileName: reference.fileName,
+    contentType: reference.contentType,
+    uploaded: Boolean(reference.artifactId)
+  };
+}
+function buildTraceSummary(reference, validationAttemptId) {
+  if (!reference) {
+    return null;
+  }
+  return {
+    artifactId: reference.artifactId,
+    validationAttemptId,
+    fileName: reference.fileName,
+    contentType: reference.contentType,
+    uploaded: Boolean(reference.artifactId),
+    summary: reference.artifactId ? `Playwright trace uploaded as ${reference.fileName ?? "trace.zip"}.` : `Playwright trace was captured locally as ${reference.fileName ?? "trace.zip"} but was not uploaded.`
+  };
+}
+function defaultArtifactReference(test, kind) {
+  return kind === "screenshot" ? {
+    artifactId: null,
+    fileName: `${safeFilePart2(test.implementationId)}-screenshot.png`,
+    contentType: "image/png"
+  } : {
+    artifactId: null,
+    fileName: `${safeFilePart2(test.implementationId)}-trace.zip`,
+    contentType: "application/zip"
+  };
+}
+function normalizeFeedbackEntries(entries) {
+  if (!entries) {
+    return [];
+  }
+  return entries.map((entry) => entry.trim()).filter(Boolean).slice(0, 20);
 }
 function createDefaultResultReporter(config) {
   const client = new HostedRunnerApiClient({
@@ -1492,11 +1854,395 @@ function createDefaultResultReporter(config) {
   });
   return {
     async reportTestResult(projectId, runId, implementationId, request) {
-      await client.reportTestResult(projectId, runId, implementationId, request);
+      const response = await client.reportTestResult(projectId, runId, implementationId, request);
+      return {
+        resultId: response.resultId,
+        validationAttemptId: response.validationAttemptId ?? null
+      };
     },
     async completeRunResults(projectId, runId, request) {
       await client.completeRunResults(projectId, runId, request);
+    },
+    async uploadArtifact(projectId, runId, request) {
+      const response = await client.uploadArtifact(projectId, runId, request);
+      return {
+        artifactId: response.artifactId,
+        fileName: response.fileName,
+        contentType: response.contentType
+      };
     }
+  };
+}
+
+// src/environment-check.ts
+var import_playwright2 = require("playwright");
+init_playwright_install();
+var EnvironmentCheckStatus = {
+  Ready: 3,
+  BaseUrlUnreachable: 4,
+  LoginFailed: 5,
+  Timeout: 6,
+  NeedsConfiguration: 7
+};
+var AuthMode = {
+  None: 1,
+  UsernamePassword: 2,
+  CustomInstructions: 3
+};
+async function executeEnvironmentCheck(context, options = {}) {
+  const configError = validateConfiguration(context);
+  if (configError) {
+    return configError;
+  }
+  const driver = options.browserDriver ?? playwrightBrowserDriver;
+  try {
+    const result = await driver(context);
+    return {
+      ...result,
+      statusReason: result.statusReason ? redactSecrets(result.statusReason, context) : null
+    };
+  } catch (error) {
+    const isTimeout = isTimeoutError(error);
+    return {
+      status: isTimeout ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
+      statusReason: redactSecrets(extractErrorMessage(error), context),
+      screenshotBuffer: null
+    };
+  }
+}
+function validateConfiguration(context) {
+  if (!context.baseUrl) {
+    return {
+      status: EnvironmentCheckStatus.NeedsConfiguration,
+      statusReason: "Base URL is required.",
+      screenshotBuffer: null
+    };
+  }
+  try {
+    const url = new URL(context.baseUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return {
+        status: EnvironmentCheckStatus.NeedsConfiguration,
+        statusReason: "Base URL must use http or https.",
+        screenshotBuffer: null
+      };
+    }
+  } catch {
+    return {
+      status: EnvironmentCheckStatus.NeedsConfiguration,
+      statusReason: "Base URL must be an absolute URL.",
+      screenshotBuffer: null
+    };
+  }
+  if (context.loginUrl) {
+    try {
+      new URL(context.loginUrl);
+    } catch {
+      return {
+        status: EnvironmentCheckStatus.NeedsConfiguration,
+        statusReason: "Login URL must be an absolute URL.",
+        screenshotBuffer: null
+      };
+    }
+  }
+  if (context.authMode === AuthMode.UsernamePassword && (!context.username || !context.password)) {
+    return {
+      status: EnvironmentCheckStatus.NeedsConfiguration,
+      statusReason: "Username/password authentication requires staging credentials.",
+      screenshotBuffer: null
+    };
+  }
+  return null;
+}
+async function playwrightBrowserDriver(context) {
+  await ensurePlaywrightBrowserInstalled();
+  const startMs = Date.now();
+  const browser = await import_playwright2.chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const remaining1 = remainingMs(startMs, context.timeoutMs);
+    if (remaining1 <= 0) {
+      return timeoutResult("Environment check timed out before navigating to the base URL.");
+    }
+    try {
+      const response = await page.goto(context.baseUrl, {
+        waitUntil: "load",
+        timeout: remaining1
+      });
+      if (response && !isSuccessStatus(response.status())) {
+        return {
+          status: EnvironmentCheckStatus.BaseUrlUnreachable,
+          statusReason: `Received HTTP ${response.status()} from ${hostOf(context.baseUrl)}.`,
+          screenshotBuffer: await takeScreenshot(page)
+        };
+      }
+    } catch (error) {
+      return {
+        status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
+        statusReason: extractErrorMessage(error),
+        screenshotBuffer: await takeScreenshot(page)
+      };
+    }
+    if (context.authMode === AuthMode.None && !context.loginUrl) {
+      return {
+        status: EnvironmentCheckStatus.Ready,
+        statusReason: "Base URL is reachable.",
+        screenshotBuffer: await takeScreenshot(page)
+      };
+    }
+    if (context.loginUrl) {
+      const remaining2 = remainingMs(startMs, context.timeoutMs);
+      if (remaining2 <= 0) {
+        return timeoutResult("Environment check timed out before navigating to the login page.");
+      }
+      try {
+        const response = await page.goto(context.loginUrl, {
+          waitUntil: "load",
+          timeout: remaining2
+        });
+        if (response && !isSuccessStatus(response.status())) {
+          return {
+            status: EnvironmentCheckStatus.LoginFailed,
+            statusReason: `Received HTTP ${response.status()} from login page.`,
+            screenshotBuffer: await takeScreenshot(page)
+          };
+        }
+      } catch (error) {
+        return {
+          status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
+          statusReason: extractErrorMessage(error),
+          screenshotBuffer: await takeScreenshot(page)
+        };
+      }
+    }
+    if (context.authMode === AuthMode.UsernamePassword && context.username && context.password) {
+      const loginError = await performCredentialLogin(page, context, startMs);
+      if (loginError) {
+        return loginError;
+      }
+    }
+    if (context.postLoginVerificationHint) {
+      const hintError = await verifyPostLoginHint(page, context, startMs);
+      if (hintError) {
+        return hintError;
+      }
+    }
+    return {
+      status: EnvironmentCheckStatus.Ready,
+      statusReason: buildSuccessReason(context),
+      screenshotBuffer: await takeScreenshot(page)
+    };
+  } finally {
+    await browser.close();
+  }
+}
+async function performCredentialLogin(page, context, startMs) {
+  const remaining = remainingMs(startMs, context.timeoutMs);
+  if (remaining <= 0) {
+    return timeoutResult("Environment check timed out before performing login.");
+  }
+  try {
+    const usernameInput = await findUsernameField(page, remaining);
+    if (!usernameInput) {
+      return {
+        status: EnvironmentCheckStatus.LoginFailed,
+        statusReason: "Could not find a username or email input field on the login page.",
+        screenshotBuffer: await takeScreenshot(page)
+      };
+    }
+    const passwordInput = page.locator('input[type="password"]').first();
+    const hasPassword = await passwordInput.waitFor({ state: "visible", timeout: Math.min(5e3, remaining) }).then(() => true).catch(() => false);
+    if (!hasPassword) {
+      return {
+        status: EnvironmentCheckStatus.LoginFailed,
+        statusReason: "Could not find a password input field on the login page.",
+        screenshotBuffer: await takeScreenshot(page)
+      };
+    }
+    await usernameInput.fill(context.username);
+    await passwordInput.fill(context.password);
+    await passwordInput.press("Enter");
+    const settleTimeout = Math.min(
+      1e4,
+      remainingMs(startMs, context.timeoutMs)
+    );
+    if (settleTimeout > 0) {
+      await page.waitForLoadState("networkidle", { timeout: settleTimeout }).catch(() => {
+      });
+    }
+  } catch (error) {
+    return {
+      status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
+      statusReason: extractErrorMessage(error),
+      screenshotBuffer: await takeScreenshot(page)
+    };
+  }
+  return null;
+}
+async function verifyPostLoginHint(page, context, startMs) {
+  const remaining = remainingMs(startMs, context.timeoutMs);
+  if (remaining <= 0) {
+    return timeoutResult(
+      "Environment check timed out before verifying post-login hint."
+    );
+  }
+  const hint = context.postLoginVerificationHint;
+  try {
+    await page.getByText(hint, { exact: false }).first().waitFor({ state: "visible", timeout: remaining });
+  } catch {
+    return {
+      status: EnvironmentCheckStatus.LoginFailed,
+      statusReason: `Post-login verification failed: could not find "${truncate3(hint, 100)}" on the page after login.`,
+      screenshotBuffer: await takeScreenshot(page)
+    };
+  }
+  return null;
+}
+var USERNAME_SELECTORS = [
+  'input[type="email"]:visible',
+  'input[name="email"]:visible',
+  'input[name="username"]:visible',
+  'input[name="user"]:visible',
+  'input[name="login"]:visible',
+  'input[id="email"]:visible',
+  'input[id="username"]:visible',
+  'input[id="login"]:visible',
+  'input[autocomplete="username"]:visible',
+  'input[autocomplete="email"]:visible',
+  'input[type="text"]:visible'
+];
+async function findUsernameField(page, timeoutMs) {
+  const waitTimeout = Math.min(5e3, timeoutMs);
+  for (const selector of USERNAME_SELECTORS) {
+    const locator = page.locator(selector).first();
+    const found = await locator.waitFor({ state: "visible", timeout: waitTimeout }).then(() => true).catch(() => false);
+    if (found) {
+      return locator;
+    }
+  }
+  return null;
+}
+async function takeScreenshot(page) {
+  try {
+    return await page.screenshot({ type: "png", fullPage: false });
+  } catch {
+    return null;
+  }
+}
+function timeoutResult(reason) {
+  return {
+    status: EnvironmentCheckStatus.Timeout,
+    statusReason: reason,
+    screenshotBuffer: null
+  };
+}
+function remainingMs(startMs, totalMs) {
+  return Math.max(0, totalMs - (Date.now() - startMs));
+}
+function isSuccessStatus(status) {
+  return status >= 200 && status < 400;
+}
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+function buildSuccessReason(context) {
+  if (context.authMode === AuthMode.UsernamePassword && context.username && context.password) {
+    return context.postLoginVerificationHint ? "Base URL is reachable, login succeeded, and post-login verification passed." : "Base URL is reachable and login succeeded.";
+  }
+  if (context.loginUrl) {
+    return context.authMode === AuthMode.CustomInstructions ? "Base URL and login page are reachable; custom login instructions are available to the hosted runner." : "Base URL and login page are reachable.";
+  }
+  return "Base URL is reachable.";
+}
+function isTimeoutError(error) {
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError") {
+      return true;
+    }
+    const message = error.message.toLowerCase();
+    return message.includes("timeout") && (message.includes("exceeded") || message.includes("navigation") || message.includes("waiting"));
+  }
+  return false;
+}
+function extractErrorMessage(error) {
+  if (error instanceof Error) {
+    return truncate3(error.message);
+  }
+  return truncate3(String(error));
+}
+function redactSecrets(message, context) {
+  let result = message;
+  const secrets = [context.username, context.password].filter(
+    (value) => Boolean(value && value.length > 0)
+  );
+  for (const secret of secrets) {
+    result = replaceAll(result, secret, "[REDACTED]");
+  }
+  return result;
+}
+function replaceAll(input, search, replacement) {
+  if (!search) {
+    return input;
+  }
+  let result = input;
+  let index = result.indexOf(search);
+  while (index !== -1) {
+    result = result.slice(0, index) + replacement + result.slice(index + search.length);
+    index = result.indexOf(search, index + replacement.length);
+  }
+  return result;
+}
+function truncate3(value, maxLength = 1e3) {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
+}
+
+// src/hosted-environment-check.ts
+var SCREENSHOT_ARTIFACT_KIND = 0;
+async function runHostedEnvironmentCheck(config, options = {}) {
+  const checkResult = await executeEnvironmentCheck(config.context, {
+    browserDriver: options.browserDriver
+  });
+  let artifactId = null;
+  if (checkResult.screenshotBuffer) {
+    const uploader = options.artifactUploader ?? createDefaultUploader(config);
+    artifactId = await uploadScreenshot(
+      uploader,
+      config.projectId,
+      config.runId,
+      checkResult.screenshotBuffer
+    );
+  }
+  return {
+    status: checkResult.status,
+    statusReason: checkResult.statusReason,
+    artifactId
+  };
+}
+async function uploadScreenshot(uploader, projectId, runId, screenshot) {
+  try {
+    return await uploader(projectId, runId, {
+      kind: SCREENSHOT_ARTIFACT_KIND,
+      fileName: "environment-check-screenshot.png",
+      contentType: "image/png",
+      contentBase64: screenshot.toString("base64")
+    });
+  } catch {
+    return null;
+  }
+}
+function createDefaultUploader(config) {
+  const client = new HostedRunnerApiClient({
+    apiUrl: config.apiUrl,
+    sessionToken: config.sessionToken,
+    timeoutMs: 3e4
+  });
+  return async (projectId, runId, request) => {
+    const response = await client.uploadArtifact(projectId, runId, request);
+    return response.artifactId;
   };
 }
 
@@ -1514,6 +2260,8 @@ var PER_TEST_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_PER_TEST_TIMEOUT_SECONDS";
 var MAX_TESTS_PER_RUN_ENV_VAR = "TESTMUTANT_MAX_TESTS_PER_RUN";
 var MAX_ARTIFACT_SIZE_BYTES_ENV_VAR = "TESTMUTANT_MAX_ARTIFACT_SIZE_BYTES";
 var MAX_REPAIR_ATTEMPTS_ENV_VAR = "TESTMUTANT_MAX_REPAIR_ATTEMPTS";
+var ENVIRONMENT_CHECK_ID_ENV_VAR = "TESTMUTANT_ENVIRONMENT_CHECK_ID";
+var ENVIRONMENT_CHECK_TIMEOUT_SECONDS_ENV_VAR = "TESTMUTANT_ENVIRONMENT_CHECK_TIMEOUT_SECONDS";
 function resolveHostedRunnerConfig() {
   const hostedRunnerJobId = requireEnv(HOSTED_RUNNER_JOB_ID_ENV_VAR);
   const organizationId = requireEnv(ORGANIZATION_ID_ENV_VAR);
@@ -1602,6 +2350,53 @@ function parsePayloadJson(json) {
     );
   }
   return parsed;
+}
+function resolveEnvironmentCheckConfig() {
+  const hostedRunnerJobId = requireEnv(HOSTED_RUNNER_JOB_ID_ENV_VAR);
+  const organizationId = requireEnv(ORGANIZATION_ID_ENV_VAR);
+  const projectId = requireEnv(PROJECT_ID_ENV_VAR);
+  const runId = requireEnv(RUN_ID_ENV_VAR);
+  const sessionToken = requireEnv(RUNNER_SESSION_TOKEN_ENV_VAR);
+  const payloadJson = requireEnv(HOSTED_RUNNER_PAYLOAD_JSON_ENV_VAR);
+  const environmentCheckId = requireEnv(ENVIRONMENT_CHECK_ID_ENV_VAR);
+  const apiUrl = process.env[API_URL_ENV_VAR]?.trim() || DEFAULT_API_URL;
+  const environmentConfigurationId = process.env[ENVIRONMENT_CONFIGURATION_ID_ENV_VAR]?.trim() || null;
+  const timeoutSeconds = parsePositiveInt(
+    ENVIRONMENT_CHECK_TIMEOUT_SECONDS_ENV_VAR,
+    30
+  );
+  const payload = parsePayloadJson(payloadJson);
+  const environment = payload.environment;
+  if (!environment) {
+    throw new CliError(
+      "Environment check mode requires an environment configuration in the hosted runner payload.",
+      2
+    );
+  }
+  const auth = environment.auth;
+  const authMode = typeof auth?.authMode === "number" ? auth.authMode : AuthMode.None;
+  const context = {
+    baseUrl: environment.baseUrl ?? "",
+    authMode,
+    loginUrl: auth?.loginUrl ?? null,
+    loginInstructions: auth?.loginInstructions ?? null,
+    username: auth?.username ?? null,
+    password: auth?.password ?? null,
+    postLoginVerificationHint: auth?.postLoginVerificationHint ?? null,
+    timeoutMs: timeoutSeconds * 1e3
+  };
+  return {
+    hostedRunnerJobId,
+    organizationId,
+    projectId,
+    runId,
+    sessionToken,
+    apiUrl: normalizeUrl2(apiUrl),
+    environmentConfigurationId: environmentConfigurationId ?? environment.environmentConfigurationId,
+    environmentCheckId,
+    timeoutSeconds,
+    context
+  };
 }
 function normalizeUrl2(value) {
   return value.replace(/\/$/, "");
@@ -1706,6 +2501,8 @@ var hostedRunCommand = program.command("hosted-run").description("Execute a host
   console.log(
     `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`
   );
+  console.log(`Duration: ${result.durationMs}ms`);
+  console.log(`Artifacts uploaded: ${result.artifactsUploaded}`);
   if (result.status === "Failed") {
     throw new CliError(
       `Hosted run failed: ${result.failedTests} of ${result.totalTests} tests failed.`,
@@ -1714,6 +2511,25 @@ var hostedRunCommand = program.command("hosted-run").description("Execute a host
   }
 });
 hostedRunCommand.helpInformation = () => "";
+var hostedEnvCheckCommand = program.command("hosted-env-check").description("Execute a hosted environment check using API-provided context. (Internal)").action(async () => {
+  const options = program.opts();
+  const config = resolveEnvironmentCheckConfig();
+  const result = await runHostedEnvironmentCheck(config);
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Environment check completed.`);
+  console.log(`Check ID: ${config.environmentCheckId}`);
+  console.log(`Status: ${result.status}`);
+  if (result.statusReason) {
+    console.log(`Reason: ${result.statusReason}`);
+  }
+  if (result.artifactId) {
+    console.log(`Screenshot artifact: ${result.artifactId}`);
+  }
+});
+hostedEnvCheckCommand.helpInformation = () => "";
 program.showHelpAfterError();
 program.parseAsync(process.argv).catch((error) => {
   if (error instanceof CliError) {

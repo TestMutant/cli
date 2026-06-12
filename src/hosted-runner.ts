@@ -62,7 +62,7 @@ export type HostedRunnerResultReporter = {
     runId: string,
     implementationId: string,
     request: HostedRunnerTestResultRequest,
-  ): Promise<{ resultId: string | null }>;
+  ): Promise<{ resultId: string | null; validationAttemptId: string | null }>;
   completeRunResults(
     projectId: string,
     runId: string,
@@ -72,7 +72,11 @@ export type HostedRunnerResultReporter = {
     projectId: string,
     runId: string,
     request: HostedRunnerArtifactUploadRequest,
-  ): Promise<{ artifactId: string | null }>;
+  ): Promise<{
+    artifactId: string | null;
+    fileName?: string | null;
+    contentType?: string | null;
+  }>;
 };
 
 export type HostedRunnerOptions = {
@@ -111,6 +115,7 @@ export async function runHostedRunner(
     perTestTimeoutMs,
     traceMode: "retain-on-failure",
     videoMode: "retain-on-failure",
+    captureRepairFeedback: true,
   });
   const completedAtUtc = new Date().toISOString();
   const durationMs = new Date(completedAtUtc).getTime() - new Date(startedAtUtc).getTime();
@@ -122,26 +127,50 @@ export async function runHostedRunner(
     const resultStatus =
       test.status === "Passed" ? ResultStatus.Passed : ResultStatus.Failed;
 
-    const { resultId } = await resultReporter
-      .reportTestResult(config.projectId, config.runId, test.implementationId, {
-        status: resultStatus,
-        durationMs: test.durationMs,
-        errorMessage: test.errorMessage,
-        environmentUrl: baseUrl,
-        startedAtUtc,
-        completedAtUtc,
-      })
-      .catch(() => ({ resultId: null }));
+    const initialOutputJson = buildRepairFeedbackOutput(test, null, null);
+    const baseRequest = buildTestResultRequest(
+      resultStatus,
+      baseUrl,
+      startedAtUtc,
+      completedAtUtc,
+      test,
+      initialOutputJson,
+    );
+    const { resultId, validationAttemptId } = await resultReporter
+      .reportTestResult(
+        config.projectId,
+        config.runId,
+        test.implementationId,
+        baseRequest,
+      )
+      .catch(() => ({ resultId: null, validationAttemptId: null }));
 
     // Upload artifacts for this test result (best-effort).
-    artifactsUploaded += await uploadTestArtifacts(
+    const artifactUploads = await uploadTestArtifacts(
       resultReporter,
       config.projectId,
       config.runId,
       resultId,
+      validationAttemptId,
       test,
       maxArtifactSizeBytes,
     );
+    artifactsUploaded += artifactUploads.uploadedCount;
+
+    const finalOutputJson = buildRepairFeedbackOutput(
+      test,
+      artifactUploads,
+      validationAttemptId,
+    );
+
+    if (finalOutputJson && finalOutputJson !== initialOutputJson) {
+      await resultReporter
+        .reportTestResult(config.projectId, config.runId, test.implementationId, {
+          ...baseRequest,
+          outputJson: finalOutputJson,
+        })
+        .catch(() => ({ resultId: null, validationAttemptId: null }));
+    }
   }
 
   // Complete the run with aggregate results.
@@ -198,6 +227,20 @@ type ExecutionOptions = {
   perTestTimeoutMs: number;
   traceMode: "off" | "retain-on-failure";
   videoMode: "off" | "retain-on-failure";
+  captureRepairFeedback: boolean;
+};
+
+type UploadedArtifactReference = {
+  artifactId: string | null;
+  fileName: string | null;
+  contentType: string | null;
+};
+
+type TestArtifactUploads = {
+  uploadedCount: number;
+  screenshot: UploadedArtifactReference | null;
+  trace: UploadedArtifactReference | null;
+  video: UploadedArtifactReference | null;
 };
 
 async function executeTests(
@@ -222,6 +265,7 @@ async function executeTests(
       perTestTimeoutMs: options.perTestTimeoutMs,
       traceMode: options.traceMode,
       videoMode: options.videoMode,
+      captureRepairFeedback: options.captureRepairFeedback,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -251,17 +295,19 @@ async function executeTests(
  * Uploads screenshot, trace, and video artifacts for a single test result.
  * Each upload is best-effort; failures are silently ignored.
  * Artifacts exceeding the max size limit are skipped.
- * Returns the count of successfully uploaded artifacts.
+ * Returns both the upload count and normalized artifact references.
  */
 async function uploadTestArtifacts(
   reporter: HostedRunnerResultReporter,
   projectId: string,
   runId: string,
   resultId: string | null,
+  validationAttemptId: string | null,
   test: TestRunResult,
   maxArtifactSizeBytes: number,
-): Promise<number> {
+): Promise<TestArtifactUploads> {
   const artifacts: Array<{
+    key: "screenshot" | "trace" | "video";
     kind: number;
     fileName: string;
     contentType: string;
@@ -270,6 +316,7 @@ async function uploadTestArtifacts(
 
   if (test.screenshotBuffer) {
     artifacts.push({
+      key: "screenshot",
       kind: ArtifactKind.Screenshot,
       fileName: `${safeFilePart(test.implementationId)}-screenshot.png`,
       contentType: "image/png",
@@ -279,6 +326,7 @@ async function uploadTestArtifacts(
 
   if (test.traceBuffer) {
     artifacts.push({
+      key: "trace",
       kind: ArtifactKind.Trace,
       fileName: `${safeFilePart(test.implementationId)}-trace.zip`,
       contentType: "application/zip",
@@ -288,6 +336,7 @@ async function uploadTestArtifacts(
 
   if (test.videoBuffer) {
     artifacts.push({
+      key: "video",
       kind: ArtifactKind.Video,
       fileName: `${safeFilePart(test.implementationId)}-video.webm`,
       contentType: "video/webm",
@@ -296,32 +345,182 @@ async function uploadTestArtifacts(
   }
 
   let uploaded = 0;
+  const references: TestArtifactUploads = {
+    uploadedCount: 0,
+    screenshot: null,
+    trace: null,
+    video: null,
+  };
 
   for (const artifact of artifacts) {
     if (artifact.buffer.byteLength > maxArtifactSizeBytes) {
+      references[artifact.key] = {
+        artifactId: null,
+        fileName: artifact.fileName,
+        contentType: artifact.contentType,
+      };
       continue;
     }
 
-    const { artifactId } = await reporter
+    const response = await reporter
       .uploadArtifact(projectId, runId, {
         kind: artifact.kind,
         fileName: artifact.fileName,
         contentType: artifact.contentType,
         contentBase64: artifact.buffer.toString("base64"),
         runImplementationResultId: resultId,
+        validationAttemptId,
       })
-      .catch(() => ({ artifactId: null }));
+      .catch(() => ({
+        artifactId: null,
+        fileName: artifact.fileName,
+        contentType: artifact.contentType,
+      }));
 
-    if (artifactId) {
+    references[artifact.key] = {
+      artifactId: response.artifactId,
+      fileName: response.fileName ?? artifact.fileName,
+      contentType: response.contentType ?? artifact.contentType,
+    };
+
+    if (response.artifactId) {
       uploaded += 1;
     }
   }
 
-  return uploaded;
+  return {
+    ...references,
+    uploadedCount: uploaded,
+  };
 }
 
 function safeFilePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
+}
+
+function buildTestResultRequest(
+  resultStatus: number,
+  baseUrl: string | null,
+  startedAtUtc: string,
+  completedAtUtc: string,
+  test: TestRunResult,
+  outputJson: string | null,
+): HostedRunnerTestResultRequest {
+  return {
+    status: resultStatus,
+    durationMs: test.durationMs,
+    errorMessage: test.errorMessage,
+    environmentUrl: baseUrl,
+    startedAtUtc,
+    completedAtUtc,
+    outputJson,
+  };
+}
+
+function buildRepairFeedbackOutput(
+  test: TestRunResult,
+  uploads: TestArtifactUploads | null,
+  validationAttemptId: string | null,
+): string | null {
+  if (test.status !== "Failed") {
+    return null;
+  }
+
+  const consoleLogs = normalizeFeedbackEntries(test.repairFeedback?.consoleLogs);
+  const browserObservations = normalizeFeedbackEntries(
+    test.repairFeedback?.browserObservations,
+  );
+  const screenshotReference = buildArtifactReference(
+    uploads?.screenshot ?? (test.screenshotBuffer ? defaultArtifactReference(test, "screenshot") : null),
+    validationAttemptId,
+  );
+  const traceSummary = buildTraceSummary(
+    uploads?.trace ?? (test.traceBuffer ? defaultArtifactReference(test, "trace") : null),
+    validationAttemptId,
+  );
+
+  if (
+    !test.errorMessage
+    && !screenshotReference
+    && !traceSummary
+    && consoleLogs.length === 0
+    && browserObservations.length === 0
+  ) {
+    return null;
+  }
+
+  return JSON.stringify({
+    errorMessage: test.errorMessage,
+    screenshotReference,
+    traceSummary,
+    consoleLogs,
+    browserObservations,
+  });
+}
+
+function buildArtifactReference(
+  reference: UploadedArtifactReference | null,
+  validationAttemptId: string | null,
+): Record<string, string | boolean | null> | null {
+  if (!reference) {
+    return null;
+  }
+
+  return {
+    artifactId: reference.artifactId,
+    validationAttemptId,
+    fileName: reference.fileName,
+    contentType: reference.contentType,
+    uploaded: Boolean(reference.artifactId),
+  };
+}
+
+function buildTraceSummary(
+  reference: UploadedArtifactReference | null,
+  validationAttemptId: string | null,
+): Record<string, string | boolean | null> | null {
+  if (!reference) {
+    return null;
+  }
+
+  return {
+    artifactId: reference.artifactId,
+    validationAttemptId,
+    fileName: reference.fileName,
+    contentType: reference.contentType,
+    uploaded: Boolean(reference.artifactId),
+    summary: reference.artifactId
+      ? `Playwright trace uploaded as ${reference.fileName ?? "trace.zip"}.`
+      : `Playwright trace was captured locally as ${reference.fileName ?? "trace.zip"} but was not uploaded.`,
+  };
+}
+
+function defaultArtifactReference(
+  test: TestRunResult,
+  kind: "screenshot" | "trace",
+): UploadedArtifactReference {
+  return kind === "screenshot"
+    ? {
+        artifactId: null,
+        fileName: `${safeFilePart(test.implementationId)}-screenshot.png`,
+        contentType: "image/png",
+      }
+    : {
+        artifactId: null,
+        fileName: `${safeFilePart(test.implementationId)}-trace.zip`,
+        contentType: "application/zip",
+      };
+}
+
+function normalizeFeedbackEntries(entries: string[] | undefined): string[] {
+  if (!entries) {
+    return [];
+  }
+
+  return entries
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 20);
 }
 
 function createDefaultResultReporter(
@@ -336,14 +535,21 @@ function createDefaultResultReporter(
   return {
     async reportTestResult(projectId, runId, implementationId, request) {
       const response = await client.reportTestResult(projectId, runId, implementationId, request);
-      return { resultId: response.resultId };
+      return {
+        resultId: response.resultId,
+        validationAttemptId: response.validationAttemptId ?? null,
+      };
     },
     async completeRunResults(projectId, runId, request) {
       await client.completeRunResults(projectId, runId, request);
     },
     async uploadArtifact(projectId, runId, request) {
       const response = await client.uploadArtifact(projectId, runId, request);
-      return { artifactId: response.artifactId };
+      return {
+        artifactId: response.artifactId,
+        fileName: response.fileName,
+        contentType: response.contentType,
+      };
     },
   };
 }

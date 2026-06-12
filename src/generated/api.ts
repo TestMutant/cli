@@ -488,6 +488,8 @@ export interface components {
             failureClassification: components["schemas"]["FailureClassification"];
             /** Format: date-time */
             createdAtUtc: string;
+            /** Format: uuid */
+            validationAttemptId: null | string;
         };
         HostedRunnerTestSource: {
             sourceKind: string;
