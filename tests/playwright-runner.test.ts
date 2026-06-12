@@ -136,6 +136,69 @@ test("runPlaywrightTests reports failures and unsupported test types", async () 
   assert.equal(summary.tests[2]?.errorMessage, "Unsupported runner kind: manual");
 });
 
+test("runPlaywrightTests captures repair feedback when requested", async () => {
+  const failing = buildTest("22222222-2222-2222-2222-222222222222", "fails");
+
+  const summary = await runPlaywrightTests([failing], {
+    captureRepairFeedback: true,
+    commandRunner: async (_command, args) => {
+      if (args.includes("install")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+
+      const fileName = args.find((arg) => arg.endsWith(".spec.ts"));
+
+      return {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          suites: [
+            {
+              file: fileName,
+              specs: [
+                {
+                  title: "fails",
+                  ok: false,
+                  tests: [
+                    {
+                      ok: false,
+                      results: [
+                        {
+                          status: "failed",
+                          duration: 45,
+                          error: { message: "Expected heading to be visible" },
+                          stdout: ["console.error: timeout"],
+                          stderr: [{ text: "page crashed" }],
+                          steps: [
+                            { title: "goto /login" },
+                            {
+                              title: "expect heading to be visible",
+                              error: { message: "Locator did not resolve" },
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    },
+  });
+
+  assert.deepEqual(summary.tests[0]?.repairFeedback, {
+    consoleLogs: ["stdout: console.error: timeout", "stderr: page crashed"],
+    browserObservations: [
+      "Test: fails",
+      "goto /login",
+      "expect heading to be visible: Locator did not resolve",
+    ],
+  });
+});
+
 // ---------------------------------------------------------------------------
 // CLI-03: Per-test timeout and trace/video in Playwright config
 // ---------------------------------------------------------------------------

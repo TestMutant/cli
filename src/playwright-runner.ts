@@ -8,6 +8,11 @@ import type { CliRunImplementation } from "./api-client";
 
 export type TestRunStatus = "Passed" | "Failed";
 
+export type TestRepairFeedback = {
+  consoleLogs: string[];
+  browserObservations: string[];
+};
+
 export type TestRunResult = {
   implementationId: string;
   runnerKind: string;
@@ -18,6 +23,7 @@ export type TestRunResult = {
   screenshotBuffer: Buffer | null;
   traceBuffer: Buffer | null;
   videoBuffer: Buffer | null;
+  repairFeedback?: TestRepairFeedback;
 };
 
 export type TestRunSummary = {
@@ -34,6 +40,7 @@ export type PlaywrightExecutionOptions = {
   perTestTimeoutMs?: number;
   traceMode?: "off" | "retain-on-failure";
   videoMode?: "off" | "retain-on-failure";
+  captureRepairFeedback?: boolean;
   cwd?: string;
   commandRunner?: PlaywrightCommandRunner;
 };
@@ -89,12 +96,30 @@ type PlaywrightAttachment = {
   path?: string;
 };
 
+type PlaywrightIoEntry =
+  | string
+  | {
+      text?: string;
+      buffer?: string;
+      message?: string;
+    };
+
+type PlaywrightStep = {
+  title?: string;
+  category?: string;
+  error?: PlaywrightError;
+  steps?: PlaywrightStep[];
+};
+
 type PlaywrightCaseResult = {
   status?: string;
   duration?: number;
   error?: PlaywrightError;
   errors?: PlaywrightError[];
   attachments?: PlaywrightAttachment[];
+  stdout?: PlaywrightIoEntry[];
+  stderr?: PlaywrightIoEntry[];
+  steps?: PlaywrightStep[];
 };
 
 type PlaywrightError = {
@@ -151,7 +176,12 @@ export async function runPlaywrightTests(
       },
     );
 
-    const mappedResults = await mapPlaywrightResults(writtenTests, result, workDir);
+    const mappedResults = await mapPlaywrightResults(
+      writtenTests,
+      result,
+      workDir,
+      options.captureRepairFeedback === true,
+    );
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
       ...unsupportedResults,
@@ -212,6 +242,7 @@ async function mapPlaywrightResults(
   writtenTests: WrittenTest[],
   commandResult: PlaywrightCommandResult,
   workDir: string,
+  captureRepairFeedback: boolean,
 ): Promise<TestRunResult[]> {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = new Map<string, TestRunResult>();
@@ -223,7 +254,13 @@ async function mapPlaywrightResults(
 
   if (report) {
     for (const suite of report.suites ?? []) {
-      await collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
+      await collectSuiteResults(
+        suite,
+        writtenTests,
+        fileResults,
+        fallbackError,
+        captureRepairFeedback,
+      );
     }
   }
 
@@ -252,6 +289,7 @@ async function collectSuiteResults(
   writtenTests: WrittenTest[],
   fileResults: Map<string, TestRunResult>,
   fallbackError: string | null,
+  captureRepairFeedback: boolean,
 ): Promise<void> {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName
@@ -279,6 +317,11 @@ async function collectSuiteResults(
       videoBuffer = await readAttachmentByName(result, "video");
     }
 
+    const repairFeedback =
+      captureRepairFeedback && isFailed
+        ? extractRepairFeedback(failedSpec, result)
+        : undefined;
+
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
@@ -291,11 +334,18 @@ async function collectSuiteResults(
       screenshotBuffer,
       traceBuffer,
       videoBuffer,
+      ...(repairFeedback ? { repairFeedback } : {}),
     });
   }
 
   for (const child of suite.suites ?? []) {
-    await collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+    await collectSuiteResults(
+      child,
+      writtenTests,
+      fileResults,
+      fallbackError,
+      captureRepairFeedback,
+    );
   }
 }
 
@@ -354,6 +404,120 @@ function sumDurations(specs: PlaywrightSpec[]): number | null {
     .reduce((total, result) => total + (result.duration ?? 0), 0);
 
   return duration > 0 ? duration : null;
+}
+
+function extractRepairFeedback(
+  spec: PlaywrightSpec | undefined,
+  result: PlaywrightCaseResult | undefined,
+): TestRepairFeedback | undefined {
+  if (!result) {
+    return undefined;
+  }
+
+  const consoleLogs = normalizeFeedbackLines([
+    ...readIoEntries(result.stdout, "stdout"),
+    ...readIoEntries(result.stderr, "stderr"),
+  ]);
+  const browserObservations = normalizeFeedbackLines([
+    spec?.title ? `Test: ${spec.title}` : null,
+    ...collectStepObservations(result.steps),
+  ]);
+
+  if (consoleLogs.length === 0 && browserObservations.length === 0) {
+    return undefined;
+  }
+
+  return {
+    consoleLogs,
+    browserObservations,
+  };
+}
+
+function readIoEntries(
+  entries: PlaywrightIoEntry[] | undefined,
+  stream: "stdout" | "stderr",
+): string[] {
+  const lines: string[] = [];
+
+  for (const entry of entries ?? []) {
+    const text = readIoEntryText(entry);
+    if (!text) {
+      continue;
+    }
+
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed) {
+        lines.push(`${stream}: ${trimmed}`);
+      }
+    }
+  }
+
+  return lines;
+}
+
+function readIoEntryText(entry: PlaywrightIoEntry): string | null {
+  if (typeof entry === "string") {
+    return entry;
+  }
+
+  if (entry && typeof entry === "object") {
+    if (typeof entry.text === "string") {
+      return entry.text;
+    }
+
+    if (typeof entry.message === "string") {
+      return entry.message;
+    }
+
+    if (typeof entry.buffer === "string") {
+      try {
+        return Buffer.from(entry.buffer, "base64").toString("utf8");
+      } catch {
+        return entry.buffer;
+      }
+    }
+  }
+
+  return null;
+}
+
+function collectStepObservations(steps: PlaywrightStep[] | undefined): string[] {
+  const observations: string[] = [];
+
+  for (const step of steps ?? []) {
+    const title = firstNonEmpty(step.title);
+    const error = step.error ? formatError(step.error) : null;
+
+    if (title && error) {
+      observations.push(`${title}: ${error}`);
+    } else if (title) {
+      observations.push(title);
+    } else if (error) {
+      observations.push(error);
+    }
+
+    observations.push(...collectStepObservations(step.steps));
+  }
+
+  return observations;
+}
+
+function normalizeFeedbackLines(values: Array<string | null | undefined>): string[] {
+  const normalized = new Set<string>();
+
+  for (const value of values) {
+    const text = firstNonEmpty(value);
+    if (text) {
+      normalized.add(truncate(text, 300));
+    }
+
+    if (normalized.size >= 20) {
+      break;
+    }
+  }
+
+  return [...normalized];
 }
 
 function summarize(baseUrl: string | null, tests: TestRunResult[]): TestRunSummary {

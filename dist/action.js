@@ -138,7 +138,9 @@ async function runPlaywrightTests(tests, options = {}) {
     status: "Failed",
     errorMessage: `Unsupported runner kind: ${test.runnerKind}`,
     durationMs: null,
-    screenshotBuffer: null
+    screenshotBuffer: null,
+    traceBuffer: null,
+    videoBuffer: null
   }));
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
@@ -148,7 +150,7 @@ async function runPlaywrightTests(tests, options = {}) {
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
       supported,
-      options.baseUrl ?? null
+      options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
     await ensurePlaywrightBrowserInstalled();
@@ -163,7 +165,12 @@ async function runPlaywrightTests(tests, options = {}) {
         }
       }
     );
-    const mappedResults = await mapPlaywrightResults(writtenTests, result, workDir);
+    const mappedResults = await mapPlaywrightResults(
+      writtenTests,
+      result,
+      workDir,
+      options.captureRepairFeedback === true
+    );
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
       ...unsupportedResults
@@ -175,16 +182,22 @@ async function runPlaywrightTests(tests, options = {}) {
 function isPlaywrightTest(test) {
   return test.runnerKind.trim().toLowerCase() === PLAYWRIGHT_TYPE;
 }
-async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
+async function writePlaywrightWorkspace(workDir, tests, options) {
+  const baseUrl = options.baseUrl ?? null;
+  const perTestTimeoutMs = options.perTestTimeoutMs ?? 3e4;
+  const traceMode = options.traceMode ?? "off";
+  const videoMode = options.videoMode ?? "off";
   await (0, import_promises.writeFile)(
     (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
-      "  timeout: 30000,",
+      `  timeout: ${perTestTimeoutMs},`,
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
       "    screenshot: 'only-on-failure',",
+      `    trace: '${traceMode}',`,
+      `    video: '${videoMode}',`,
       "  },",
       `  outputDir: './test-results',`,
       "};",
@@ -204,13 +217,19 @@ async function writePlaywrightWorkspace(workDir, tests, baseUrl) {
   }
   return writtenTests;
 }
-async function mapPlaywrightResults(writtenTests, commandResult, workDir) {
+async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback) {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = /* @__PURE__ */ new Map();
   const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
   if (report) {
     for (const suite of report.suites ?? []) {
-      await collectSuiteResults(suite, writtenTests, fileResults, fallbackError);
+      await collectSuiteResults(
+        suite,
+        writtenTests,
+        fileResults,
+        fallbackError,
+        captureRepairFeedback
+      );
     }
   }
   return writtenTests.map(({ test, fileName }) => {
@@ -225,11 +244,13 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir) {
       status: commandResult.exitCode === 0 ? "Passed" : "Failed",
       errorMessage: commandResult.exitCode === 0 ? null : fallbackError,
       durationMs: null,
-      screenshotBuffer: null
+      screenshotBuffer: null,
+      traceBuffer: null,
+      videoBuffer: null
     };
   });
 }
-async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError) {
+async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback) {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
   if (writtenTest && fileName) {
@@ -241,9 +262,14 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
     );
     const isFailed = Boolean(failedSpec || failedCase);
     let screenshotBuffer = null;
+    let traceBuffer = null;
+    let videoBuffer = null;
     if (isFailed && result) {
       screenshotBuffer = await readScreenshotAttachment(result);
+      traceBuffer = await readAttachmentByName(result, "trace");
+      videoBuffer = await readAttachmentByName(result, "video");
     }
+    const repairFeedback = captureRepairFeedback && isFailed ? extractRepairFeedback(failedSpec, result) : void 0;
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
@@ -251,16 +277,28 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       status: isFailed ? "Failed" : "Passed",
       errorMessage: isFailed ? formatResultError(result) ?? fallbackError ?? "Playwright test failed." : null,
       durationMs: sumDurations(specs),
-      screenshotBuffer
+      screenshotBuffer,
+      traceBuffer,
+      videoBuffer,
+      ...repairFeedback ? { repairFeedback } : {}
     });
   }
   for (const child of suite.suites ?? []) {
-    await collectSuiteResults(child, writtenTests, fileResults, fallbackError);
+    await collectSuiteResults(
+      child,
+      writtenTests,
+      fileResults,
+      fallbackError,
+      captureRepairFeedback
+    );
   }
 }
 async function readScreenshotAttachment(result) {
+  return readAttachmentByName(result, "screenshot");
+}
+async function readAttachmentByName(result, name) {
   const attachment = result.attachments?.find(
-    (a) => a.name === "screenshot" && a.path
+    (a) => a.name === name && a.path
   );
   if (!attachment?.path) {
     return null;
@@ -297,6 +335,92 @@ function formatError(error) {
 function sumDurations(specs) {
   const duration = specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).reduce((total, result) => total + (result.duration ?? 0), 0);
   return duration > 0 ? duration : null;
+}
+function extractRepairFeedback(spec, result) {
+  if (!result) {
+    return void 0;
+  }
+  const consoleLogs = normalizeFeedbackLines([
+    ...readIoEntries(result.stdout, "stdout"),
+    ...readIoEntries(result.stderr, "stderr")
+  ]);
+  const browserObservations = normalizeFeedbackLines([
+    spec?.title ? `Test: ${spec.title}` : null,
+    ...collectStepObservations(result.steps)
+  ]);
+  if (consoleLogs.length === 0 && browserObservations.length === 0) {
+    return void 0;
+  }
+  return {
+    consoleLogs,
+    browserObservations
+  };
+}
+function readIoEntries(entries, stream) {
+  const lines = [];
+  for (const entry of entries ?? []) {
+    const text = readIoEntryText(entry);
+    if (!text) {
+      continue;
+    }
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed) {
+        lines.push(`${stream}: ${trimmed}`);
+      }
+    }
+  }
+  return lines;
+}
+function readIoEntryText(entry) {
+  if (typeof entry === "string") {
+    return entry;
+  }
+  if (entry && typeof entry === "object") {
+    if (typeof entry.text === "string") {
+      return entry.text;
+    }
+    if (typeof entry.message === "string") {
+      return entry.message;
+    }
+    if (typeof entry.buffer === "string") {
+      try {
+        return Buffer.from(entry.buffer, "base64").toString("utf8");
+      } catch {
+        return entry.buffer;
+      }
+    }
+  }
+  return null;
+}
+function collectStepObservations(steps) {
+  const observations = [];
+  for (const step of steps ?? []) {
+    const title = firstNonEmpty(step.title);
+    const error = step.error ? formatError(step.error) : null;
+    if (title && error) {
+      observations.push(`${title}: ${error}`);
+    } else if (title) {
+      observations.push(title);
+    } else if (error) {
+      observations.push(error);
+    }
+    observations.push(...collectStepObservations(step.steps));
+  }
+  return observations;
+}
+function normalizeFeedbackLines(values) {
+  const normalized = /* @__PURE__ */ new Set();
+  for (const value of values) {
+    const text = firstNonEmpty(value);
+    if (text) {
+      normalized.add(truncate2(text, 300));
+    }
+    if (normalized.size >= 20) {
+      break;
+    }
+  }
+  return [...normalized];
 }
 function summarize(baseUrl, tests) {
   const passed = tests.filter((test) => test.status === "Passed").length;
@@ -644,7 +768,7 @@ async function createDirectPlaywrightDriver(baseUrl) {
               failed: summary.failed,
               baseUrl: summary.baseUrl
             },
-            tests: summary.tests,
+            tests: summary.tests.map(toValidationTestResult),
             failureExcerpt: summary.tests.find((test) => test.status === "Failed")?.errorMessage ?? null
           };
         }
@@ -718,14 +842,28 @@ function parseValidationSummary(value) {
     passed: summary.passed,
     failed: summary.failed,
     tests: summary.tests.filter((item) => Boolean(item && typeof item === "object")).map((item) => ({
-      implementationId: typeof item.implementationId === "string" ? item.implementationId : "",
-      runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : "",
+      implementationId: typeof item.implementationId === "string" ? item.implementationId : typeof item.testId === "string" ? item.testId : "",
+      runnerKind: typeof item.runnerKind === "string" ? item.runnerKind : typeof item.type === "string" ? item.type : "",
       name: typeof item.name === "string" ? item.name : "",
       status: item.status === "Passed" ? "Passed" : "Failed",
       errorMessage: typeof item.errorMessage === "string" ? item.errorMessage : null,
       durationMs: typeof item.durationMs === "number" ? item.durationMs : null,
-      screenshotBuffer: null
+      screenshotBuffer: null,
+      traceBuffer: null,
+      videoBuffer: null
     }))
+  };
+}
+function toValidationTestResult(test) {
+  return {
+    testId: test.implementationId,
+    implementationId: test.implementationId,
+    type: test.runnerKind,
+    runnerKind: test.runnerKind,
+    name: test.name,
+    status: test.status,
+    errorMessage: test.errorMessage,
+    durationMs: test.durationMs
   };
 }
 function normalizeArguments(value) {
@@ -1299,7 +1437,9 @@ async function executeTestsForApiCompletion(testExecutor, implementations, baseU
         status: "Failed",
         errorMessage: message,
         durationMs: null,
-        screenshotBuffer: null
+        screenshotBuffer: null,
+        traceBuffer: null,
+        videoBuffer: null
       }))
     };
   }
