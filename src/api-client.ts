@@ -13,6 +13,17 @@ export type CliRunCreatedResponse =
 export type CliCompleteRunResponse =
   operations["CliV1_CompleteRun"]["responses"][200]["content"]["application/json"];
 
+export type HostedRunnerTestResultRequest =
+  components["schemas"]["HostedRunnerTestResultRequest"];
+export type HostedRunnerTestResultResponse =
+  components["schemas"]["HostedRunnerTestResultResponse"];
+export type HostedRunnerCompleteRunResultRequest =
+  components["schemas"]["HostedRunnerCompleteRunResultRequest"];
+export type HostedRunnerCompleteRunResultResponse =
+  components["schemas"]["HostedRunnerCompleteRunResultResponse"];
+export type HostedRunnerHeartbeatResponse =
+  components["schemas"]["HostedRunnerHeartbeatResponse"];
+
 export type TestMutantApiClientOptions = {
   apiKey: string;
   apiUrl: string;
@@ -59,15 +70,11 @@ export class TestMutantApiClient {
       screenshot.byteOffset,
       screenshot.byteOffset + screenshot.byteLength,
     ) as ArrayBuffer;
-<<<<<<< Updated upstream
-    formData.append("file", new Blob([bytes], { type: "image/png" }), "screenshot.png");
-=======
     formData.append(
       "file",
       new Blob([bytes], { type: "image/png" }),
       "screenshot.png",
     );
->>>>>>> Stashed changes
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
@@ -209,4 +216,104 @@ function truncate(value: string, maxLength: number): string {
   }
 
   return `${value.slice(0, maxLength)}...`;
+}
+
+export type HostedRunnerApiClientOptions = {
+  apiUrl: string;
+  sessionToken: string;
+  timeoutMs: number;
+};
+
+export class HostedRunnerApiClient {
+  constructor(private readonly options: HostedRunnerApiClientOptions) {}
+
+  async heartbeat(
+    projectId: string,
+    runId: string,
+  ): Promise<HostedRunnerHeartbeatResponse> {
+    return this.postJson<HostedRunnerHeartbeatResponse>(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/heartbeat`,
+    );
+  }
+
+  async reportTestResult(
+    projectId: string,
+    runId: string,
+    implementationId: string,
+    request: HostedRunnerTestResultRequest,
+  ): Promise<HostedRunnerTestResultResponse> {
+    return this.postJson<HostedRunnerTestResultResponse>(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/${enc(implementationId)}`,
+      request,
+    );
+  }
+
+  async completeRunResults(
+    projectId: string,
+    runId: string,
+    request: HostedRunnerCompleteRunResultRequest,
+  ): Promise<HostedRunnerCompleteRunResultResponse> {
+    return this.postJson<HostedRunnerCompleteRunResultResponse>(
+      `/api/cli/v1/hosted-runner/projects/${enc(projectId)}/runs/${enc(runId)}/results/complete`,
+      request,
+    );
+  }
+
+  private async postJson<TResponse>(
+    path: string,
+    body?: unknown,
+    expectedStatus = 200,
+  ): Promise<TResponse> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+
+    try {
+      const response = await fetch(new URL(path, this.options.apiUrl), {
+        method: "POST",
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+        headers: {
+          accept: "application/json",
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+          authorization: `Bearer ${this.options.sessionToken}`,
+        },
+      });
+
+      if (response.status === 401) {
+        throw new CliError("Hosted runner session token rejected. The token may have expired or been revoked.", 3);
+      }
+
+      if (response.status !== expectedStatus) {
+        const detail = await readErrorDetail(response);
+        throw new CliError(
+          `Hosted runner API request failed with HTTP ${response.status}.${detail}`,
+        );
+      }
+
+      try {
+        return (await response.json()) as TResponse;
+      } catch {
+        throw new CliError("Hosted runner API returned invalid JSON.");
+      }
+    } catch (error) {
+      if (error instanceof CliError) {
+        throw error;
+      }
+
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new CliError(
+          `Hosted runner API request timed out after ${this.options.timeoutMs} ms.`,
+        );
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      throw new CliError(`Could not reach hosted runner API. ${message}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function enc(value: string): string {
+  return encodeURIComponent(value);
 }

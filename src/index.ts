@@ -4,6 +4,8 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runCi } from "./run-ci";
+import { runHostedRunner } from "./hosted-runner";
+import { resolveHostedRunnerConfig } from "./hosted-runner-config";
 import { Command } from "commander";
 import { TestMutantApiClient } from "./api-client";
 import { buildCreateRunRequest } from "./ci-metadata";
@@ -171,6 +173,39 @@ program
       );
     },
   );
+
+const hostedRunCommand = program
+  .command("hosted-run")
+  .description("Execute a hosted runner job using API-provided context. (Internal)")
+  .action(async () => {
+    const options = program.opts<GlobalOptions>();
+    const config = resolveHostedRunnerConfig();
+
+    const result = await runHostedRunner(config);
+
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(`Hosted run completed.`);
+    console.log(`Run ID: ${result.runId}`);
+    console.log(`Project ID: ${result.projectId}`);
+    console.log(`Status: ${result.status}`);
+    console.log(
+      `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`,
+    );
+
+    if (result.status === "Failed") {
+      throw new CliError(
+        `Hosted run failed: ${result.failedTests} of ${result.totalTests} tests failed.`,
+        1,
+      );
+    }
+  });
+
+// Hide the hosted-run command from help output; it is invoked by the API server, not by users.
+hostedRunCommand.helpInformation = () => "";
 
 program.showHelpAfterError();
 

@@ -155,7 +155,7 @@ if (shouldGenerate) {
     errorMessage: passed ? null : `${testSummary.failed} Playwright test failed.`,
     results: testSummary.tests.map((t) => ({
       implementationId: t.implementationId,
-      passed: t.status === "Passed",
+      status: t.status === "Passed" ? 0 : 1,
       durationMs: t.durationMs,
       errorMessage: t.errorMessage,
       stackTrace: null,
