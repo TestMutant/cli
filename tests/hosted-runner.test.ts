@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   runHostedRunner,
+  type HostedRunnerAgentGenerator,
   type HostedRunnerResultReporter,
   type HostedRunnerTestExecutor,
 } from "../src/hosted-runner";
@@ -241,6 +242,57 @@ test("runHostedRunner executes tests and reports passing results", async () => {
 
   // No artifacts uploaded for passing tests.
   assert.equal(reporter.artifacts.length, 0);
+});
+
+test("runHostedRunner invokes agent generation for hosted generation runs", async () => {
+  const config = buildConfig();
+  config.payload.project.runKind = 2;
+  const reporter = createMockReporter();
+
+  let capturedOptions: Parameters<HostedRunnerAgentGenerator>[0] | null = null;
+  let validationExecutorCalled = false;
+
+  const result = await runHostedRunner(config, {
+    resultReporter: reporter,
+    heartbeatIntervalMs: 10_000,
+    testExecutor: async () => {
+      validationExecutorCalled = true;
+      throw new Error("validation executor should not be called");
+    },
+    agentGenerator: async (options) => {
+      capturedOptions = options;
+      return {
+        testImplementationId: "ffff0000-ffff-ffff-ffff-ffffffffffff",
+        name: "generated login test",
+        sourceLength: 1200,
+        attemptCount: 1,
+        validationSummary: {
+          kind: "playwright",
+          baseUrl: "https://staging.example.test",
+          total: 1,
+          passed: 1,
+          failed: 0,
+          tests: [],
+        },
+      };
+    },
+  });
+
+  assert.equal(validationExecutorCalled, false);
+  assert.equal(result.status, "Passed");
+  assert.equal(result.totalTests, 1);
+  assert.equal(result.passedTests, 1);
+  assert.equal(result.failedTests, 0);
+  const agentOptions = capturedOptions as Parameters<HostedRunnerAgentGenerator>[0] | null;
+  assert.ok(agentOptions);
+  assert.equal(agentOptions.apiKey, "session-token");
+  assert.equal(agentOptions.runId, "cccc0000-cccc-cccc-cccc-cccccccccccc");
+  assert.equal(agentOptions.baseUrl, "https://staging.example.test");
+  assert.equal(agentOptions.timeoutMs, 900_000);
+  assert.equal(
+    agentOptions.webSocketUrl,
+    "wss://api.example.test/api/cli/v1/hosted-runner/projects/bbbb0000-bbbb-bbbb-bbbb-bbbbbbbbbbbb/runs/cccc0000-cccc-cccc-cccc-cccccccccccc/agent/ws",
+  );
 });
 
 test("runHostedRunner cancels execution when heartbeat is rejected", async () => {

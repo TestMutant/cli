@@ -25,6 +25,7 @@ export type AgentRunnerOptions = {
   userAgent: string;
   runId: string;
   baseUrl?: string | null;
+  webSocketUrl?: string;
   browserDriver?: BrowserDriver;
   webSocketFactory?: WebSocketFactory;
 };
@@ -95,6 +96,27 @@ export function buildAgentWebSocketUrl(apiUrl: string, runId: string): string {
   return url.toString();
 }
 
+export function buildHostedAgentWebSocketUrl(
+  apiUrl: string,
+  projectId: string,
+  runId: string,
+): string {
+  const url = new URL(
+    `/api/cli/v1/hosted-runner/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/agent/ws`,
+    apiUrl,
+  );
+
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  } else {
+    throw new CliError(`Unsupported TestMutant API URL protocol: ${url.protocol}`);
+  }
+
+  return url.toString();
+}
+
 export async function runAgentGeneration(
   options: AgentRunnerOptions,
 ): Promise<AgentGenerationResult> {
@@ -113,7 +135,7 @@ async function runAgentWebSocketLoop(
   browserDriver: BrowserDriver,
 ): Promise<AgentGenerationResult> {
   const webSocketFactory = options.webSocketFactory ?? createDefaultWebSocket;
-  const socket = webSocketFactory(buildAgentWebSocketUrl(options.apiUrl, options.runId), {
+  const socket = webSocketFactory(options.webSocketUrl ?? buildAgentWebSocketUrl(options.apiUrl, options.runId), {
     handshakeTimeout: options.timeoutMs,
     headers: {
       authorization: `Bearer ${options.apiKey}`,
