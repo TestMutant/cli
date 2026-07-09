@@ -1,32 +1,35 @@
-import type { components, operations } from "./generated/api";
 import { CliError } from "./config";
-
-export type PingResponse =
-  operations["CliV1_Ping"]["responses"][200]["content"]["application/json"];
-export type CliPingRequest = components["schemas"]["CliPingRequest"];
-export type CliCreateRunRequest = components["schemas"]["CliCreateRunRequest"];
-export type CliCompleteRunRequest =
-  components["schemas"]["CliCompleteRunRequest"];
-export type CliRunImplementation = components["schemas"]["CliRunImplementation"];
-export type CliRunCreatedResponse =
-  operations["CliV1_CreateRun"]["responses"][201]["content"]["application/json"];
-export type CliCompleteRunResponse =
-  operations["CliV1_CompleteRun"]["responses"][200]["content"]["application/json"];
-
-export type HostedRunnerTestResultRequest =
-  components["schemas"]["HostedRunnerTestResultRequest"];
-export type HostedRunnerTestResultResponse =
-  components["schemas"]["HostedRunnerTestResultResponse"];
-export type HostedRunnerCompleteRunResultRequest =
-  components["schemas"]["HostedRunnerCompleteRunResultRequest"];
-export type HostedRunnerCompleteRunResultResponse =
-  components["schemas"]["HostedRunnerCompleteRunResultResponse"];
-export type HostedRunnerHeartbeatResponse =
-  components["schemas"]["HostedRunnerHeartbeatResponse"];
-export type HostedRunnerArtifactUploadRequest =
-  components["schemas"]["HostedRunnerArtifactUploadRequest"];
-export type HostedRunnerArtifactUploadResponse =
-  components["schemas"]["HostedRunnerArtifactUploadResponse"];
+export type {
+  CliCompleteRunRequest,
+  CliCompleteRunResponse,
+  CliCreateRunRequest,
+  CliPingRequest,
+  CliRunCreatedResponse,
+  CliRunImplementation,
+  HostedRunnerArtifactUploadRequest,
+  HostedRunnerArtifactUploadResponse,
+  HostedRunnerCompleteRunResultRequest,
+  HostedRunnerCompleteRunResultResponse,
+  HostedRunnerHeartbeatResponse,
+  HostedRunnerTestResultRequest,
+  HostedRunnerTestResultResponse,
+  PingResponse,
+} from "./api-client/types";
+import type {
+  CliCompleteRunRequest,
+  CliCompleteRunResponse,
+  CliCreateRunRequest,
+  CliPingRequest,
+  CliRunCreatedResponse,
+  HostedRunnerArtifactUploadRequest,
+  HostedRunnerArtifactUploadResponse,
+  HostedRunnerCompleteRunResultRequest,
+  HostedRunnerCompleteRunResultResponse,
+  HostedRunnerHeartbeatResponse,
+  HostedRunnerTestResultRequest,
+  HostedRunnerTestResultResponse,
+  PingResponse,
+} from "./api-client/types";
 
 export type TestMutantApiClientOptions = {
   apiKey: string;

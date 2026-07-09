@@ -3,6 +3,7 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runRunnerServiceCommand } from "./commands/runner-service";
 import { runCi } from "./run-ci";
 import { runHostedRunner } from "./hosted-runner";
 import { runHostedEnvironmentCheck } from "./hosted-environment-check";
@@ -45,15 +46,30 @@ program
   .option("--timeout <ms>", "API request timeout in milliseconds.", "30000")
   .option("--json", "Print command output as JSON.");
 
-program.hook("preAction", async () => {
+program.hook("preAction", async (_thisCommand, actionCommand) => {
   const options = program.opts<GlobalOptions>();
 
-  if (options.json) {
+  if (options.json || actionCommand.name() === "runner-service") {
     return;
   }
 
   await printUpdateReminder(packageInfo);
 });
+
+program
+  .command("runner-service")
+  .description("Start the internal HTTP Playwright runner service.")
+  .option("--host <host>", "Host to bind. Defaults to TESTMUTANT_RUNNER_HOST or 0.0.0.0.")
+  .option("--port <port>", "Port to bind. Defaults to TESTMUTANT_RUNNER_PORT or 8080.")
+  .option("--token <token>", "Internal bearer token. Defaults to TESTMUTANT_RUNNER_TOKEN.")
+  .option("--runner-instance-id <id>", "Runner instance id.")
+  .option("--artifact-dir <path>", "Artifact root directory.")
+  .option("--max-sessions <number>", "Maximum concurrent browser sessions.")
+  .option("--session-timeout-ms <number>", "Session timeout in milliseconds.")
+  .option("--headless <true|false>", "Run Chromium headless.")
+  .action(async (commandOptions) => {
+    await runRunnerServiceCommand(commandOptions, packageInfo.version);
+  });
 
 program
   .command("ping")

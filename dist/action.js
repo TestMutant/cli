@@ -8,6 +8,9 @@ var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __esm = (fn, res) => function __init() {
   return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
 };
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -87,6 +90,376 @@ var init_config = __esm({
   }
 });
 
+// src/api-client.ts
+async function readErrorDetail(response) {
+  const body = await response.text();
+  if (!body) {
+    return "";
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("json")) {
+    try {
+      const problem = JSON.parse(body);
+      const parts = [
+        typeof problem.title === "string" ? problem.title : null,
+        typeof problem.detail === "string" ? problem.detail : null,
+        formatValidationErrors(problem.errors)
+      ].filter((part) => Boolean(part));
+      if (parts.length > 0) {
+        return ` ${truncate(parts.join(" "), 500)}`;
+      }
+    } catch {
+      return ` ${truncate(body, 500)}`;
+    }
+  }
+  return ` ${truncate(body, 500)}`;
+}
+function formatValidationErrors(errors) {
+  if (!errors || typeof errors !== "object") {
+    return null;
+  }
+  const messages = [];
+  for (const [field, value] of Object.entries(errors)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string") {
+          messages.push(`${field}: ${item}`);
+        }
+      }
+    }
+  }
+  return messages.length > 0 ? messages.join(" ") : null;
+}
+function truncate(value, maxLength) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}...`;
+}
+var TestMutantApiClient;
+var init_api_client = __esm({
+  "src/api-client.ts"() {
+    "use strict";
+    init_config();
+    TestMutantApiClient = class {
+      constructor(options) {
+        this.options = options;
+      }
+      options;
+      async ping() {
+        return this.postJson("/api/cli/v1/ping", {
+          repositoryProvider: null,
+          repositoryFullName: null
+        });
+      }
+      async createRun(request) {
+        return this.postJson(
+          "/api/cli/v1/runs",
+          request,
+          201
+        );
+      }
+      async completeRun(runId, request) {
+        return this.postJson(
+          `/api/cli/v1/runs/${encodeURIComponent(runId)}/complete`,
+          request
+        );
+      }
+      async uploadScreenshot(runId, implementationId, screenshot) {
+        const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
+        const formData = new FormData();
+        const bytes = screenshot.buffer.slice(
+          screenshot.byteOffset,
+          screenshot.byteOffset + screenshot.byteLength
+        );
+        formData.append(
+          "file",
+          new Blob([bytes], { type: "image/png" }),
+          "screenshot.png"
+        );
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+        try {
+          const response = await fetch(new URL(path, this.options.apiUrl), {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+            headers: {
+              authorization: `Bearer ${this.options.apiKey}`,
+              "user-agent": this.options.userAgent
+            }
+          });
+          if (response.status !== 200) {
+            console.error(`Screenshot upload failed with HTTP ${response.status}`);
+          }
+        } catch {
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      async postJson(path, body, expectedStatus = 200) {
+        const response = await this.request(path, body);
+        if (response.status === 401) {
+          throw new CliError("Unauthorized. Check your TestMutant API key.", 3);
+        }
+        if (response.status !== expectedStatus) {
+          const detail = await readErrorDetail(response);
+          throw new CliError(
+            `TestMutant API request failed with HTTP ${response.status}.${detail}`
+          );
+        }
+        try {
+          return await response.json();
+        } catch {
+          throw new CliError("TestMutant API returned invalid JSON.");
+        }
+      }
+      async request(path, body) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+        try {
+          return await fetch(new URL(path, this.options.apiUrl), {
+            method: "POST",
+            body: JSON.stringify(body),
+            signal: controller.signal,
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+              authorization: `Bearer ${this.options.apiKey}`,
+              "user-agent": this.options.userAgent
+            }
+          });
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            throw new CliError(
+              `TestMutant API request timed out after ${this.options.timeoutMs} ms.`
+            );
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          throw new CliError(`Could not reach TestMutant API. ${message}`);
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+    };
+  }
+});
+
+// src/ci-metadata.ts
+function buildCreateRunRequest(options = {}) {
+  const env = process.env;
+  const gitRepository = getGitRepositoryMetadata();
+  const repositoryProvider = normalize(options.repositoryProvider) ?? normalize(env.TESTMUTANT_REPOSITORY_PROVIDER) ?? detectRepositoryProvider(env) ?? gitRepository.provider;
+  const repositoryFullName = normalize(options.repositoryFullName) ?? normalize(env.TESTMUTANT_REPOSITORY_FULL_NAME) ?? detectRepositoryFullName(env) ?? gitRepository.fullName;
+  if (!repositoryFullName) {
+    throw new CliError(
+      "Could not determine repository full name from CI environment or git remote origin.",
+      2
+    );
+  }
+  const testSpecId = normalize(options.testSpecId);
+  return {
+    runKind: normalize(options.runKind) ?? "Advisory",
+    repositoryProvider: repositoryProvider ?? "GitHub",
+    repositoryFullName,
+    baseUrl: normalizeUrl(options.baseUrl) ?? detectBaseUrl(env),
+    environmentName: normalize(options.environmentName) ?? detectEnvironmentName(env),
+    branch: detectBranch(env) ?? git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    commitSha: detectCommitSha(env) ?? git(["rev-parse", "HEAD"]),
+    pullRequestNumber: detectPullRequestNumber(env),
+    ciProvider: detectCiProvider(env),
+    ciRunId: detectCiRunId(env),
+    ...testSpecId ? { testSpecId } : {}
+  };
+}
+function detectRepositoryProvider(env) {
+  if (env.GITHUB_ACTIONS || env.GITHUB_REPOSITORY) {
+    return "GitHub";
+  }
+  if (env.GITLAB_CI || env.CI_PROJECT_PATH) {
+    return "GitLab";
+  }
+  if (env.BITBUCKET_BUILD_NUMBER || env.BITBUCKET_REPO_FULL_NAME) {
+    return "Bitbucket";
+  }
+  if (env.TF_BUILD || env.BUILD_REPOSITORY_URI) {
+    return "AzureDevOps";
+  }
+  return null;
+}
+function detectRepositoryFullName(env) {
+  if (env.GITHUB_REPOSITORY) {
+    return normalize(env.GITHUB_REPOSITORY);
+  }
+  if (env.GITLAB_CI && env.CI_PROJECT_PATH) {
+    return normalize(env.CI_PROJECT_PATH);
+  }
+  if (env.BITBUCKET_REPO_FULL_NAME) {
+    return normalize(env.BITBUCKET_REPO_FULL_NAME);
+  }
+  if (env.CIRCLE_PROJECT_USERNAME && env.CIRCLE_PROJECT_REPONAME) {
+    return `${env.CIRCLE_PROJECT_USERNAME}/${env.CIRCLE_PROJECT_REPONAME}`;
+  }
+  if (env.BUILD_REPOSITORY_NAME) {
+    return normalize(env.BUILD_REPOSITORY_NAME);
+  }
+  return null;
+}
+function detectBranch(env) {
+  return normalize(env.GITHUB_HEAD_REF) ?? normalize(env.GITHUB_REF_NAME) ?? branchFromGitRef(env.GITHUB_REF) ?? normalize(env.CI_COMMIT_REF_NAME) ?? normalize(env.BITBUCKET_BRANCH) ?? normalize(env.CIRCLE_BRANCH) ?? normalize(env.BUILDKITE_BRANCH) ?? normalize(env.BUILD_SOURCEBRANCHNAME) ?? branchFromGitRef(env.BUILD_SOURCEBRANCH);
+}
+function detectCommitSha(env) {
+  return normalize(env.GITHUB_SHA) ?? normalize(env.CI_COMMIT_SHA) ?? normalize(env.BITBUCKET_COMMIT) ?? normalize(env.CIRCLE_SHA1) ?? normalize(env.BUILDKITE_COMMIT) ?? normalize(env.BUILD_SOURCEVERSION);
+}
+function detectPullRequestNumber(env) {
+  return numberFromValue(env.GITHUB_REF?.match(/^refs\/pull\/(\d+)\//)?.[1]) ?? githubEventPullRequestNumber(env) ?? numberFromValue(env.CI_MERGE_REQUEST_IID) ?? numberFromValue(env.BITBUCKET_PR_ID) ?? numberFromValue(env.CIRCLE_PULL_REQUEST?.split("/").pop()) ?? numberFromValue(env.BUILDKITE_PULL_REQUEST) ?? numberFromValue(env.SYSTEM_PULLREQUEST_PULLREQUESTNUMBER);
+}
+function detectCiProvider(env) {
+  if (env.GITHUB_ACTIONS) {
+    return "GitHubActions";
+  }
+  if (env.GITLAB_CI) {
+    return "GitLabCI";
+  }
+  if (env.BITBUCKET_BUILD_NUMBER) {
+    return "BitbucketPipelines";
+  }
+  if (env.CIRCLECI) {
+    return "CircleCI";
+  }
+  if (env.BUILDKITE) {
+    return "Buildkite";
+  }
+  if (env.TF_BUILD) {
+    return "AzurePipelines";
+  }
+  if (env.JENKINS_URL) {
+    return "Jenkins";
+  }
+  return env.CI ? "CI" : null;
+}
+function detectCiRunId(env) {
+  return normalize(env.GITHUB_RUN_ID) ?? normalize(env.CI_PIPELINE_ID) ?? normalize(env.BITBUCKET_BUILD_NUMBER) ?? normalize(env.CIRCLE_WORKFLOW_ID) ?? normalize(env.CIRCLE_BUILD_NUM) ?? normalize(env.BUILDKITE_BUILD_ID) ?? normalize(env.BUILD_BUILDID) ?? normalize(env.BUILD_TAG) ?? normalize(env.BUILD_NUMBER);
+}
+function detectBaseUrl(env) {
+  return normalizeUrl(env.TESTMUTANT_BASE_URL) ?? normalizeUrl(env.DEPLOY_URL) ?? normalizeUrl(env.URL) ?? normalizeUrl(env.VERCEL_BRANCH_URL) ?? normalizeUrl(env.VERCEL_URL) ?? normalizeUrl(env.CF_PAGES_URL) ?? normalizeUrl(env.RENDER_EXTERNAL_URL);
+}
+function detectEnvironmentName(env) {
+  return normalize(env.TESTMUTANT_ENVIRONMENT) ?? normalize(env.CI_ENVIRONMENT_NAME) ?? normalize(env.VERCEL_ENV) ?? normalize(env.NETLIFY_CONTEXT) ?? normalize(env.CF_PAGES_BRANCH);
+}
+function githubEventPullRequestNumber(env) {
+  const eventPath = normalize(env.GITHUB_EVENT_PATH);
+  if (!eventPath || !(0, import_node_fs.existsSync)(eventPath)) {
+    return null;
+  }
+  try {
+    const event = JSON.parse((0, import_node_fs.readFileSync)(eventPath, "utf8"));
+    return numberFromValue(event.pull_request?.number) ?? numberFromValue(event.number);
+  } catch {
+    return null;
+  }
+}
+function getGitRepositoryMetadata() {
+  const remote = git(["remote", "get-url", "origin"]);
+  return remote ? parseGitRemoteUrl(remote) : { provider: null, fullName: null };
+}
+function parseGitRemoteUrl(remoteUrl) {
+  const remote = remoteUrl.trim();
+  const url = parseRemoteAsUrl(remote);
+  const host = url?.host ?? parseScpRemoteHost(remote);
+  const path = url?.pathname ?? parseScpRemotePath(remote);
+  const fullName = path?.replace(/^\/+/, "").replace(/\.git$/i, "").replace(/^v\d+\//i, "");
+  return {
+    provider: host ? providerFromHost(host) : null,
+    fullName: normalize(fullName)
+  };
+}
+function parseRemoteAsUrl(remote) {
+  try {
+    return new URL(remote.replace(/^git\+/, ""));
+  } catch {
+    return null;
+  }
+}
+function parseScpRemoteHost(remote) {
+  return remote.match(/^(?:[^@]+@)?([^:]+):(.+)$/)?.[1] ?? null;
+}
+function parseScpRemotePath(remote) {
+  return remote.match(/^(?:[^@]+@)?([^:]+):(.+)$/)?.[2] ?? null;
+}
+function providerFromHost(host) {
+  const normalized = host.toLowerCase();
+  if (normalized.includes("github")) {
+    return "GitHub";
+  }
+  if (normalized.includes("gitlab")) {
+    return "GitLab";
+  }
+  if (normalized.includes("bitbucket")) {
+    return "Bitbucket";
+  }
+  if (normalized.includes("dev.azure") || normalized.includes("visualstudio")) {
+    return "AzureDevOps";
+  }
+  return null;
+}
+function branchFromGitRef(value) {
+  const ref = normalize(value);
+  if (!ref) {
+    return null;
+  }
+  return ref.match(/^refs\/heads\/(.+)$/)?.[1] ?? ref.match(/^refs\/tags\/(.+)$/)?.[1] ?? null;
+}
+function normalizeUrl(value) {
+  const normalized = normalize(value);
+  if (!normalized) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(normalized)) {
+    return normalized;
+  }
+  return `https://${normalized}`;
+}
+function numberFromValue(value) {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  if (value.toLowerCase() === "false") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+function normalize(value) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+function git(args) {
+  try {
+    const safeDirectory = process.cwd().replace(/\\/g, "/");
+    return normalize(
+      (0, import_node_child_process.execFileSync)("git", ["-c", `safe.directory=${safeDirectory}`, ...args], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"]
+      })
+    );
+  } catch {
+    return null;
+  }
+}
+var import_node_child_process, import_node_fs;
+var init_ci_metadata = __esm({
+  "src/ci-metadata.ts"() {
+    "use strict";
+    import_node_child_process = require("child_process");
+    import_node_fs = require("fs");
+    init_config();
+  }
+});
+
 // src/playwright-install.ts
 async function ensurePlaywrightBrowserInstalled() {
   const runtimeRequire = (0, import_node_module.createRequire)(__filename);
@@ -128,7 +501,7 @@ var init_playwright_install = __esm({
   }
 });
 
-// src/playwright-runner.ts
+// src/runner-core/playwright-execution.ts
 async function runPlaywrightTests(tests, options = {}) {
   const supported = tests.filter(isPlaywrightTest);
   const unsupported = tests.filter((test) => !isPlaywrightTest(test));
@@ -172,7 +545,8 @@ async function runPlaywrightTests(tests, options = {}) {
       writtenTests,
       result,
       workDir,
-      options.captureRepairFeedback === true
+      options.captureRepairFeedback === true,
+      options.captureStepEvidence === true
     );
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
@@ -190,6 +564,7 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
   const perTestTimeoutMs = options.perTestTimeoutMs ?? 3e4;
   const traceMode = options.traceMode ?? "off";
   const videoMode = options.videoMode ?? "off";
+  const captureStepEvidence = options.captureStepEvidence === true;
   await (0, import_promises.writeFile)(
     (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
     [
@@ -208,6 +583,13 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
     ].join("\n"),
     "utf8"
   );
+  if (captureStepEvidence) {
+    await (0, import_promises.writeFile)(
+      (0, import_node_path2.join)(workDir, STEP_RECORDER_FILE_NAME),
+      TESTMUTANT_STEP_RECORDER_SOURCE,
+      "utf8"
+    );
+  }
   const writtenTests = [];
   for (let index = 0; index < tests.length; index += 1) {
     const test = tests[index];
@@ -215,12 +597,13 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
       test.implementationId
     )}.spec.ts`;
     const filePath = (0, import_node_path2.join)(workDir, fileName);
-    await (0, import_promises.writeFile)(filePath, test.source, "utf8");
+    const source = captureStepEvidence ? instrumentPlaywrightTestSource(test.source) : test.source;
+    await (0, import_promises.writeFile)(filePath, source, "utf8");
     writtenTests.push({ test, filePath, fileName });
   }
   return writtenTests;
 }
-async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback) {
+async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback, captureStepEvidence) {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = /* @__PURE__ */ new Map();
   const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
@@ -231,7 +614,9 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir, captur
         writtenTests,
         fileResults,
         fallbackError,
-        captureRepairFeedback
+        captureRepairFeedback,
+        captureStepEvidence,
+        workDir
       );
     }
   }
@@ -253,7 +638,7 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir, captur
     };
   });
 }
-async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback) {
+async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback, captureStepEvidence, workDir) {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
   if (writtenTest && fileName) {
@@ -263,16 +648,25 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
     const result = failedCase?.results?.find(
       (caseResult) => caseResult.status && caseResult.status !== "passed"
     );
+    const primaryResult = result ?? specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).find(Boolean);
     const isFailed = Boolean(failedSpec || failedCase);
     let screenshotBuffer = null;
     let traceBuffer = null;
     let videoBuffer = null;
+    if (primaryResult) {
+      traceBuffer = await readAttachmentByName(primaryResult, "trace", workDir);
+      videoBuffer = await readAttachmentByName(primaryResult, "video", workDir);
+    }
     if (isFailed && result) {
-      screenshotBuffer = await readScreenshotAttachment(result);
-      traceBuffer = await readAttachmentByName(result, "trace");
-      videoBuffer = await readAttachmentByName(result, "video");
+      screenshotBuffer = await readScreenshotAttachment(result, workDir);
     }
     const repairFeedback = captureRepairFeedback && isFailed ? extractRepairFeedback(failedSpec, result) : void 0;
+    const evidence = captureStepEvidence && primaryResult ? await readStepEvidence(
+      primaryResult,
+      workDir,
+      writtenTest.test.source,
+      formatResultError(result) ?? fallbackError
+    ) : void 0;
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
@@ -283,7 +677,8 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       screenshotBuffer,
       traceBuffer,
       videoBuffer,
-      ...repairFeedback ? { repairFeedback } : {}
+      ...repairFeedback ? { repairFeedback } : {},
+      ...evidence ? { evidence } : {}
     });
   }
   for (const child of suite.suites ?? []) {
@@ -292,14 +687,16 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       writtenTests,
       fileResults,
       fallbackError,
-      captureRepairFeedback
+      captureRepairFeedback,
+      captureStepEvidence,
+      workDir
     );
   }
 }
-async function readScreenshotAttachment(result) {
-  return readAttachmentByName(result, "screenshot");
+async function readScreenshotAttachment(result, workDir) {
+  return readAttachmentByName(result, "screenshot", workDir);
 }
-async function readAttachmentByName(result, name) {
+async function readAttachmentByName(result, name, workDir) {
   const attachment = result.attachments?.find(
     (a) => a.name === name && a.path
   );
@@ -307,10 +704,214 @@ async function readAttachmentByName(result, name) {
     return null;
   }
   try {
-    return await (0, import_promises.readFile)(attachment.path);
+    return await (0, import_promises.readFile)(resolveAttachmentPath(attachment.path, workDir));
   } catch {
     return null;
   }
+}
+async function readStepEvidence(result, workDir, source, errorMessage) {
+  const recorderEvidence = await readRecorderEvidence(result, workDir);
+  const sourceContext = buildSourceContext(source, errorMessage);
+  if (recorderEvidence) {
+    return {
+      schemaVersion: 1,
+      source: "testmutant-playwright-step-snapshot",
+      steps: await buildRecordedEvidenceSteps(result, recorderEvidence, workDir),
+      console: {
+        entries: normalizeConsoleEntries(recorderEvidence.console?.entries),
+        capped: recorderEvidence.console?.capped === true
+      },
+      network: {
+        entries: normalizeNetworkEntries(recorderEvidence.network?.entries),
+        capped: recorderEvidence.network?.capped === true
+      },
+      sourceContext,
+      caps: {
+        maxSteps: recorderEvidence.caps?.maxSteps ?? MAX_EVIDENCE_STEPS,
+        maxConsoleEntries: recorderEvidence.caps?.maxConsoleEntries ?? MAX_CONSOLE_ENTRIES,
+        maxNetworkEntries: recorderEvidence.caps?.maxNetworkEntries ?? MAX_NETWORK_ENTRIES
+      },
+      redaction: {
+        headers: recorderEvidence.redaction?.headers ?? [
+          "authorization",
+          "cookie",
+          "set-cookie",
+          "x-api-key"
+        ],
+        queryParameters: recorderEvidence.redaction?.queryParameters ?? [
+          "token",
+          "secret",
+          "password",
+          "key",
+          "code",
+          "state",
+          "session"
+        ],
+        logs: recorderEvidence.redaction?.logs ?? true,
+        screenshots: recorderEvidence.redaction?.screenshots ?? "Sensitive input fields are masked before screenshot capture where selectors can be detected."
+      },
+      reporterFallback: false
+    };
+  }
+  return {
+    schemaVersion: 1,
+    source: "testmutant-playwright-step-snapshot",
+    steps: buildReporterEvidenceSteps(result.steps),
+    console: { entries: [], capped: false },
+    network: { entries: [], capped: false },
+    sourceContext,
+    caps: {
+      maxSteps: MAX_EVIDENCE_STEPS,
+      maxConsoleEntries: MAX_CONSOLE_ENTRIES,
+      maxNetworkEntries: MAX_NETWORK_ENTRIES
+    },
+    redaction: {
+      headers: ["authorization", "cookie", "set-cookie", "x-api-key"],
+      queryParameters: [
+        "token",
+        "secret",
+        "password",
+        "key",
+        "code",
+        "state",
+        "session"
+      ],
+      logs: true,
+      screenshots: "No step screenshots were captured from reporter step data."
+    },
+    reporterFallback: true
+  };
+}
+async function readRecorderEvidence(result, workDir) {
+  const attachment = result.attachments?.find(
+    (a) => a.name === EVIDENCE_ATTACHMENT_NAME && a.path
+  );
+  if (!attachment?.path) {
+    return null;
+  }
+  try {
+    return JSON.parse(
+      await (0, import_promises.readFile)(resolveAttachmentPath(attachment.path, workDir), "utf8")
+    );
+  } catch {
+    return null;
+  }
+}
+async function buildRecordedEvidenceSteps(result, evidence, workDir) {
+  const steps = [];
+  for (const [position, step] of (evidence.steps ?? []).entries()) {
+    if (steps.length >= MAX_EVIDENCE_STEPS) {
+      break;
+    }
+    const screenshotBuffer = step.screenshotAttachmentName ? await readAttachmentByName(result, step.screenshotAttachmentName, workDir) : null;
+    steps.push({
+      index: coercePositiveInt(step.index, position + 1),
+      title: truncate2(firstNonEmpty(step.title) ?? `Step ${position + 1}`, 200),
+      status: step.status === "Failed" ? "Failed" : "Passed",
+      durationMs: coerceNullableNumber(step.durationMs),
+      errorMessage: firstNonEmpty(step.errorMessage),
+      startedAtMs: coerceNullableNumber(step.startedAtMs),
+      completedAtMs: coerceNullableNumber(step.completedAtMs),
+      screenshotBuffer,
+      screenshotFileName: firstNonEmpty(step.screenshotFileName),
+      consoleStartIndex: coerceNonNegativeInt(step.consoleStartIndex, 0),
+      consoleEndIndex: coerceNonNegativeInt(step.consoleEndIndex, 0),
+      networkStartIndex: coerceNonNegativeInt(step.networkStartIndex, 0),
+      networkEndIndex: coerceNonNegativeInt(step.networkEndIndex, 0)
+    });
+  }
+  return steps;
+}
+function buildReporterEvidenceSteps(steps) {
+  const flattened = flattenPlaywrightSteps(steps).slice(0, MAX_EVIDENCE_STEPS);
+  return flattened.map((step, index) => ({
+    index: index + 1,
+    title: truncate2(firstNonEmpty(step.title) ?? `Step ${index + 1}`, 200),
+    status: step.error ? "Failed" : "Passed",
+    durationMs: coerceNullableNumber(step.duration),
+    errorMessage: step.error ? formatError(step.error) : null,
+    startedAtMs: null,
+    completedAtMs: null,
+    screenshotBuffer: null,
+    screenshotFileName: null,
+    consoleStartIndex: 0,
+    consoleEndIndex: 0,
+    networkStartIndex: 0,
+    networkEndIndex: 0
+  }));
+}
+function flattenPlaywrightSteps(steps) {
+  const flattened = [];
+  for (const step of steps ?? []) {
+    if (step.category === "test.step") {
+      flattened.push(step);
+    }
+    flattened.push(...flattenPlaywrightSteps(step.steps));
+  }
+  return flattened;
+}
+function normalizeConsoleEntries(entries) {
+  return (entries ?? []).slice(0, MAX_CONSOLE_ENTRIES).map((entry) => ({
+    timestampMs: coerceNullableNumber(entry.timestampMs),
+    type: truncate2(firstNonEmpty(entry.type) ?? "log", 40),
+    text: truncate2(firstNonEmpty(entry.text) ?? "", 1e3)
+  }));
+}
+function normalizeNetworkEntries(entries) {
+  return (entries ?? []).slice(0, MAX_NETWORK_ENTRIES).map((entry) => ({
+    timestampMs: coerceNullableNumber(entry.timestampMs),
+    event: entry.event === "response" || entry.event === "requestfailed" ? entry.event : "request",
+    method: firstNonEmpty(entry.method),
+    url: truncate2(firstNonEmpty(entry.url) ?? "", 1e3),
+    resourceType: firstNonEmpty(entry.resourceType),
+    status: coerceNullableNumber(entry.status),
+    failureText: firstNonEmpty(entry.failureText)
+  }));
+}
+function buildSourceContext(source, errorMessage) {
+  const failureLine = findFailureLine(errorMessage);
+  const lines = source.split(/\r?\n/);
+  const excerpt = failureLine ? lines.slice(Math.max(0, failureLine - 7), Math.min(lines.length, failureLine + 6)).map((line, index) => {
+    const lineNumber = Math.max(0, failureLine - 7) + index + 1;
+    return `${String(lineNumber).padStart(4, " ")} | ${line}`;
+  }).join("\n") : truncate2(source, 6e3);
+  return {
+    language: "typescript",
+    excerpt,
+    failureLine
+  };
+}
+function findFailureLine(errorMessage) {
+  const match = errorMessage?.match(/\.spec\.ts:(\d+):\d+/);
+  if (!match) {
+    return null;
+  }
+  const line = Number(match[1]);
+  return Number.isInteger(line) && line > 0 ? line : null;
+}
+function resolveAttachmentPath(path, workDir) {
+  return (0, import_node_path2.isAbsolute)(path) ? path : (0, import_node_path2.join)(workDir, path);
+}
+function instrumentPlaywrightTestSource(source) {
+  return source.replace(
+    /from\s+(['"])@playwright\/test\1/g,
+    `from "./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}"`
+  ).replace(
+    /require\(\s*(['"])@playwright\/test\1\s*\)/g,
+    `require("./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}")`
+  );
+}
+function coerceNullableNumber(value) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function coercePositiveInt(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+function coerceNonNegativeInt(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 function parsePlaywrightReport(stdout) {
   try {
@@ -572,9 +1173,9 @@ function firstNonEmpty(...values) {
 function truncate2(value, maxLength = 1e3) {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
-var import_node_child_process3, import_promises, import_node_os, import_node_path2, import_node_module2, PLAYWRIGHT_TYPE;
-var init_playwright_runner = __esm({
-  "src/playwright-runner.ts"() {
+var import_node_child_process3, import_promises, import_node_os, import_node_path2, import_node_module2, PLAYWRIGHT_TYPE, EVIDENCE_ATTACHMENT_NAME, MAX_EVIDENCE_STEPS, MAX_CONSOLE_ENTRIES, MAX_NETWORK_ENTRIES, STEP_RECORDER_FILE_NAME, TESTMUTANT_STEP_RECORDER_SOURCE;
+var init_playwright_execution = __esm({
+  "src/runner-core/playwright-execution.ts"() {
     "use strict";
     import_node_child_process3 = require("child_process");
     import_promises = require("fs/promises");
@@ -583,6 +1184,336 @@ var init_playwright_runner = __esm({
     init_playwright_install();
     import_node_module2 = require("module");
     PLAYWRIGHT_TYPE = "playwright";
+    EVIDENCE_ATTACHMENT_NAME = "testmutant-evidence";
+    MAX_EVIDENCE_STEPS = 60;
+    MAX_CONSOLE_ENTRIES = 100;
+    MAX_NETWORK_ENTRIES = 120;
+    STEP_RECORDER_FILE_NAME = "testmutant-step-recorder.ts";
+    TESTMUTANT_STEP_RECORDER_SOURCE = String.raw`
+import { AsyncLocalStorage } from "node:async_hooks";
+import { writeFile } from "node:fs/promises";
+import { test as base, expect, type Page, type TestInfo } from "@playwright/test";
+export * from "@playwright/test";
+
+type EvidenceStatus = "Passed" | "Failed";
+type ConsoleEntry = { timestampMs: number; type: string; text: string };
+type NetworkEntry = {
+  timestampMs: number;
+  event: "request" | "response" | "requestfailed";
+  method: string | null;
+  url: string;
+  resourceType: string | null;
+  status: number | null;
+  failureText: string | null;
+};
+type StepEntry = {
+  index: number;
+  title: string;
+  status: EvidenceStatus;
+  durationMs: number;
+  errorMessage: string | null;
+  startedAtMs: number;
+  completedAtMs: number;
+  screenshotAttachmentName: string | null;
+  screenshotFileName: string | null;
+  consoleStartIndex: number;
+  consoleEndIndex: number;
+  networkStartIndex: number;
+  networkEndIndex: number;
+};
+type EvidenceContext = {
+  page: Page;
+  testInfo: TestInfo;
+  startedAtMs: number;
+  nextStepIndex: number;
+  steps: StepEntry[];
+  stepsCapped: boolean;
+  console: ConsoleEntry[];
+  consoleCapped: boolean;
+  network: NetworkEntry[];
+  networkCapped: boolean;
+};
+
+const EVIDENCE_ATTACHMENT_NAME = "testmutant-evidence";
+const STEP_SCREENSHOT_ATTACHMENT_PREFIX = "testmutant-step-screenshot-";
+const MAX_STEPS = 60;
+const MAX_CONSOLE = 100;
+const MAX_NETWORK = 120;
+const REDACTED = "[REDACTED]";
+const SENSITIVE_QUERY_NAMES = /token|secret|password|pass|key|code|state|session|cookie|auth/i;
+const SENSITIVE_SCREENSHOT_SELECTOR = [
+  "input[type='password']",
+  "input[name*='password' i]",
+  "input[name*='token' i]",
+  "input[name*='secret' i]",
+  "input[name*='key' i]",
+  "input[name*='code' i]",
+  "input[name*='card' i]",
+  "input[id*='password' i]",
+  "input[id*='token' i]",
+  "input[id*='secret' i]",
+  "input[id*='key' i]",
+  "input[id*='card' i]",
+  "textarea[name*='secret' i]",
+  "textarea[name*='token' i]"
+].join(", ");
+
+const storage = new AsyncLocalStorage<EvidenceContext>();
+
+const test = base.extend<{ _testmutantEvidence: void }>({
+  _testmutantEvidence: [async ({ page }, use, testInfo) => {
+    const context: EvidenceContext = {
+      page,
+      testInfo,
+      startedAtMs: Date.now(),
+      nextStepIndex: 1,
+      steps: [],
+      stepsCapped: false,
+      console: [],
+      consoleCapped: false,
+      network: [],
+      networkCapped: false
+    };
+
+    attachPageEvents(page, context);
+    await storage.run(context, async () => {
+      try {
+        await use();
+      } finally {
+        await attachEvidence(context);
+      }
+    });
+  }, { auto: true }]
+});
+
+const originalStep = base.step.bind(base);
+const recordedStep = (async (title: string, body: (...args: unknown[]) => unknown, options?: unknown) => {
+  const context = storage.getStore();
+  if (!context) {
+    return originalStep(title, body as never, options as never);
+  }
+
+  const index = context.nextStepIndex++;
+  const started = Date.now();
+  const consoleStartIndex = context.console.length;
+  const networkStartIndex = context.network.length;
+  let errorMessage: string | null = null;
+
+  return originalStep(title, async (...args: unknown[]) => {
+    try {
+      return await body(...args);
+    } catch (error) {
+      errorMessage = redact(formatError(error));
+      throw error;
+    } finally {
+      if (context.steps.length >= MAX_STEPS) {
+        context.stepsCapped = true;
+        return;
+      }
+
+      const completed = Date.now();
+      const screenshot = await captureStepScreenshot(context, index);
+      context.steps.push({
+        index,
+        title: redact(String(title)),
+        status: errorMessage ? "Failed" : "Passed",
+        durationMs: completed - started,
+        errorMessage,
+        startedAtMs: started - context.startedAtMs,
+        completedAtMs: completed - context.startedAtMs,
+        screenshotAttachmentName: screenshot.attachmentName,
+        screenshotFileName: screenshot.fileName,
+        consoleStartIndex,
+        consoleEndIndex: context.console.length,
+        networkStartIndex,
+        networkEndIndex: context.network.length
+      });
+    }
+  }, options as never);
+}) as typeof base.step;
+Object.assign(recordedStep, originalStep);
+(test as typeof base).step = recordedStep;
+
+export { expect, test };
+
+function attachPageEvents(page: Page, context: EvidenceContext): void {
+  page.on("console", (message) => {
+    pushConsole(context, {
+      timestampMs: elapsed(context),
+      type: message.type(),
+      text: redact(message.text())
+    });
+  });
+
+  page.on("pageerror", (error) => {
+    pushConsole(context, {
+      timestampMs: elapsed(context),
+      type: "pageerror",
+      text: redact(formatError(error))
+    });
+  });
+
+  page.on("request", (request) => {
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "request",
+      method: request.method(),
+      url: redactUrl(request.url()),
+      resourceType: request.resourceType(),
+      status: null,
+      failureText: null
+    });
+  });
+
+  page.on("response", (response) => {
+    const request = response.request();
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "response",
+      method: request.method(),
+      url: redactUrl(response.url()),
+      resourceType: request.resourceType(),
+      status: response.status(),
+      failureText: null
+    });
+  });
+
+  page.on("requestfailed", (request) => {
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "requestfailed",
+      method: request.method(),
+      url: redactUrl(request.url()),
+      resourceType: request.resourceType(),
+      status: null,
+      failureText: redact(request.failure()?.errorText ?? "request failed")
+    });
+  });
+}
+
+async function captureStepScreenshot(
+  context: EvidenceContext,
+  index: number,
+): Promise<{ attachmentName: string | null; fileName: string | null }> {
+  const attachmentName = STEP_SCREENSHOT_ATTACHMENT_PREFIX + String(index);
+  const fileName = attachmentName + ".png";
+  const path = context.testInfo.outputPath(fileName);
+
+  try {
+    await context.page.screenshot({
+      path,
+      fullPage: false,
+      animations: "disabled",
+      mask: [context.page.locator(SENSITIVE_SCREENSHOT_SELECTOR)]
+    });
+    await context.testInfo.attach(attachmentName, {
+      path,
+      contentType: "image/png"
+    });
+    return { attachmentName, fileName };
+  } catch {
+    return { attachmentName: null, fileName: null };
+  }
+}
+
+async function attachEvidence(context: EvidenceContext): Promise<void> {
+  const path = context.testInfo.outputPath("testmutant-evidence.json");
+  const payload = {
+    schemaVersion: 1,
+    source: "testmutant-playwright-step-snapshot",
+    steps: context.steps,
+    stepsCapped: context.stepsCapped,
+    console: {
+      entries: context.console,
+      capped: context.consoleCapped
+    },
+    network: {
+      entries: context.network,
+      capped: context.networkCapped
+    },
+    caps: {
+      maxSteps: MAX_STEPS,
+      maxConsoleEntries: MAX_CONSOLE,
+      maxNetworkEntries: MAX_NETWORK
+    },
+    redaction: {
+      headers: ["authorization", "cookie", "set-cookie", "x-api-key"],
+      queryParameters: ["token", "secret", "password", "key", "code", "state", "session"],
+      logs: true,
+      screenshots: "Sensitive input fields are masked before screenshot capture where selectors can be detected."
+    }
+  };
+
+  try {
+    await writeFile(path, JSON.stringify(payload, null, 2), "utf8");
+    await context.testInfo.attach(EVIDENCE_ATTACHMENT_NAME, {
+      path,
+      contentType: "application/json"
+    });
+  } catch {
+  }
+}
+
+function pushConsole(context: EvidenceContext, entry: ConsoleEntry): void {
+  if (context.console.length >= MAX_CONSOLE) {
+    context.consoleCapped = true;
+    return;
+  }
+
+  context.console.push(entry);
+}
+
+function pushNetwork(context: EvidenceContext, entry: NetworkEntry): void {
+  if (context.network.length >= MAX_NETWORK) {
+    context.networkCapped = true;
+    return;
+  }
+
+  context.network.push(entry);
+}
+
+function elapsed(context: EvidenceContext): number {
+  return Date.now() - context.startedAtMs;
+}
+
+function redactUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    for (const [key] of url.searchParams) {
+      if (SENSITIVE_QUERY_NAMES.test(key)) {
+        url.searchParams.set(key, REDACTED);
+      }
+    }
+    return url.toString();
+  } catch {
+    return redact(value);
+  }
+}
+
+function redact(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer " + REDACTED)
+    .replace(/\b(token|secret|password|api[_-]?key|session|cookie|authorization)\b\s*[:=]\s*["']?[^"',;\s]+/gi, "$1=" + REDACTED)
+    .replace(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED)
+    .slice(0, 1000);
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+
+  return String(error);
+}
+`;
+  }
+});
+
+// src/playwright-runner.ts
+var init_playwright_runner = __esm({
+  "src/playwright-runner.ts"() {
+    "use strict";
+    init_playwright_execution();
   }
 });
 
@@ -644,7 +1575,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
   let generationResult = null;
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      fail2(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
+      fail(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
     }, options.timeoutMs);
     const finish = () => {
       if (settled || activeToolCalls > 0) {
@@ -656,7 +1587,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       socket.close();
       resolve();
     };
-    const fail2 = (error) => {
+    const fail = (error) => {
       if (settled) {
         return;
       }
@@ -669,10 +1600,10 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       sendJson(socket, { type: "runner_ready" });
     });
     socket.on("message", (data) => {
-      void handleMessage(data).catch(fail2);
+      void handleMessage(data).catch(fail);
     });
     socket.on("error", (error) => {
-      fail2(new CliError(`TestMutant agent websocket failed. ${error.message}`));
+      fail(new CliError(`TestMutant agent websocket failed. ${error.message}`));
     });
     socket.on("close", (_code, reason) => {
       if (!settled && activeToolCalls === 0) {
@@ -698,7 +1629,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
         return;
       }
       if (message.type === "error") {
-        fail2(new CliError(formatApiError(message.message)));
+        fail(new CliError(formatApiError(message.message)));
         return;
       }
       activeToolCalls += 1;
@@ -973,372 +1904,7 @@ var init_agent_runner = __esm({
   }
 });
 
-// src/action.ts
-var import_node_fs2 = require("fs");
-var import_node_path3 = require("path");
-init_config();
-
-// src/api-client.ts
-init_config();
-var TestMutantApiClient = class {
-  constructor(options) {
-    this.options = options;
-  }
-  options;
-  async ping() {
-    return this.postJson("/api/cli/v1/ping", {
-      repositoryProvider: null,
-      repositoryFullName: null
-    });
-  }
-  async createRun(request) {
-    return this.postJson(
-      "/api/cli/v1/runs",
-      request,
-      201
-    );
-  }
-  async completeRun(runId, request) {
-    return this.postJson(
-      `/api/cli/v1/runs/${encodeURIComponent(runId)}/complete`,
-      request
-    );
-  }
-  async uploadScreenshot(runId, implementationId, screenshot) {
-    const path = `/api/cli/v1/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(implementationId)}/screenshot`;
-    const formData = new FormData();
-    const bytes = screenshot.buffer.slice(
-      screenshot.byteOffset,
-      screenshot.byteOffset + screenshot.byteLength
-    );
-    formData.append(
-      "file",
-      new Blob([bytes], { type: "image/png" }),
-      "screenshot.png"
-    );
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    try {
-      const response = await fetch(new URL(path, this.options.apiUrl), {
-        method: "POST",
-        body: formData,
-        signal: controller.signal,
-        headers: {
-          authorization: `Bearer ${this.options.apiKey}`,
-          "user-agent": this.options.userAgent
-        }
-      });
-      if (response.status !== 200) {
-        console.error(`Screenshot upload failed with HTTP ${response.status}`);
-      }
-    } catch {
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  async postJson(path, body, expectedStatus = 200) {
-    const response = await this.request(path, body);
-    if (response.status === 401) {
-      throw new CliError("Unauthorized. Check your TestMutant API key.", 3);
-    }
-    if (response.status !== expectedStatus) {
-      const detail = await readErrorDetail(response);
-      throw new CliError(
-        `TestMutant API request failed with HTTP ${response.status}.${detail}`
-      );
-    }
-    try {
-      return await response.json();
-    } catch {
-      throw new CliError("TestMutant API returned invalid JSON.");
-    }
-  }
-  async request(path, body) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    try {
-      return await fetch(new URL(path, this.options.apiUrl), {
-        method: "POST",
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        headers: {
-          accept: "application/json",
-          "content-type": "application/json",
-          authorization: `Bearer ${this.options.apiKey}`,
-          "user-agent": this.options.userAgent
-        }
-      });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new CliError(
-          `TestMutant API request timed out after ${this.options.timeoutMs} ms.`
-        );
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      throw new CliError(`Could not reach TestMutant API. ${message}`);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-};
-async function readErrorDetail(response) {
-  const body = await response.text();
-  if (!body) {
-    return "";
-  }
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("json")) {
-    try {
-      const problem = JSON.parse(body);
-      const parts = [
-        typeof problem.title === "string" ? problem.title : null,
-        typeof problem.detail === "string" ? problem.detail : null,
-        formatValidationErrors(problem.errors)
-      ].filter((part) => Boolean(part));
-      if (parts.length > 0) {
-        return ` ${truncate(parts.join(" "), 500)}`;
-      }
-    } catch {
-      return ` ${truncate(body, 500)}`;
-    }
-  }
-  return ` ${truncate(body, 500)}`;
-}
-function formatValidationErrors(errors) {
-  if (!errors || typeof errors !== "object") {
-    return null;
-  }
-  const messages = [];
-  for (const [field, value] of Object.entries(errors)) {
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === "string") {
-          messages.push(`${field}: ${item}`);
-        }
-      }
-    }
-  }
-  return messages.length > 0 ? messages.join(" ") : null;
-}
-function truncate(value, maxLength) {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, maxLength)}...`;
-}
-
-// src/ci-metadata.ts
-var import_node_child_process = require("child_process");
-var import_node_fs = require("fs");
-init_config();
-function buildCreateRunRequest(options = {}) {
-  const env = process.env;
-  const gitRepository = getGitRepositoryMetadata();
-  const repositoryProvider = normalize(options.repositoryProvider) ?? normalize(env.TESTMUTANT_REPOSITORY_PROVIDER) ?? detectRepositoryProvider(env) ?? gitRepository.provider;
-  const repositoryFullName = normalize(options.repositoryFullName) ?? normalize(env.TESTMUTANT_REPOSITORY_FULL_NAME) ?? detectRepositoryFullName(env) ?? gitRepository.fullName;
-  if (!repositoryFullName) {
-    throw new CliError(
-      "Could not determine repository full name from CI environment or git remote origin.",
-      2
-    );
-  }
-  const testSpecId = normalize(options.testSpecId);
-  return {
-    runKind: normalize(options.runKind) ?? "Advisory",
-    repositoryProvider: repositoryProvider ?? "GitHub",
-    repositoryFullName,
-    baseUrl: normalizeUrl(options.baseUrl) ?? detectBaseUrl(env),
-    environmentName: normalize(options.environmentName) ?? detectEnvironmentName(env),
-    branch: detectBranch(env) ?? git(["rev-parse", "--abbrev-ref", "HEAD"]),
-    commitSha: detectCommitSha(env) ?? git(["rev-parse", "HEAD"]),
-    pullRequestNumber: detectPullRequestNumber(env),
-    ciProvider: detectCiProvider(env),
-    ciRunId: detectCiRunId(env),
-    ...testSpecId ? { testSpecId } : {}
-  };
-}
-function detectRepositoryProvider(env) {
-  if (env.GITHUB_ACTIONS || env.GITHUB_REPOSITORY) {
-    return "GitHub";
-  }
-  if (env.GITLAB_CI || env.CI_PROJECT_PATH) {
-    return "GitLab";
-  }
-  if (env.BITBUCKET_BUILD_NUMBER || env.BITBUCKET_REPO_FULL_NAME) {
-    return "Bitbucket";
-  }
-  if (env.TF_BUILD || env.BUILD_REPOSITORY_URI) {
-    return "AzureDevOps";
-  }
-  return null;
-}
-function detectRepositoryFullName(env) {
-  if (env.GITHUB_REPOSITORY) {
-    return normalize(env.GITHUB_REPOSITORY);
-  }
-  if (env.GITLAB_CI && env.CI_PROJECT_PATH) {
-    return normalize(env.CI_PROJECT_PATH);
-  }
-  if (env.BITBUCKET_REPO_FULL_NAME) {
-    return normalize(env.BITBUCKET_REPO_FULL_NAME);
-  }
-  if (env.CIRCLE_PROJECT_USERNAME && env.CIRCLE_PROJECT_REPONAME) {
-    return `${env.CIRCLE_PROJECT_USERNAME}/${env.CIRCLE_PROJECT_REPONAME}`;
-  }
-  if (env.BUILD_REPOSITORY_NAME) {
-    return normalize(env.BUILD_REPOSITORY_NAME);
-  }
-  return null;
-}
-function detectBranch(env) {
-  return normalize(env.GITHUB_HEAD_REF) ?? normalize(env.GITHUB_REF_NAME) ?? branchFromGitRef(env.GITHUB_REF) ?? normalize(env.CI_COMMIT_REF_NAME) ?? normalize(env.BITBUCKET_BRANCH) ?? normalize(env.CIRCLE_BRANCH) ?? normalize(env.BUILDKITE_BRANCH) ?? normalize(env.BUILD_SOURCEBRANCHNAME) ?? branchFromGitRef(env.BUILD_SOURCEBRANCH);
-}
-function detectCommitSha(env) {
-  return normalize(env.GITHUB_SHA) ?? normalize(env.CI_COMMIT_SHA) ?? normalize(env.BITBUCKET_COMMIT) ?? normalize(env.CIRCLE_SHA1) ?? normalize(env.BUILDKITE_COMMIT) ?? normalize(env.BUILD_SOURCEVERSION);
-}
-function detectPullRequestNumber(env) {
-  return numberFromValue(env.GITHUB_REF?.match(/^refs\/pull\/(\d+)\//)?.[1]) ?? githubEventPullRequestNumber(env) ?? numberFromValue(env.CI_MERGE_REQUEST_IID) ?? numberFromValue(env.BITBUCKET_PR_ID) ?? numberFromValue(env.CIRCLE_PULL_REQUEST?.split("/").pop()) ?? numberFromValue(env.BUILDKITE_PULL_REQUEST) ?? numberFromValue(env.SYSTEM_PULLREQUEST_PULLREQUESTNUMBER);
-}
-function detectCiProvider(env) {
-  if (env.GITHUB_ACTIONS) {
-    return "GitHubActions";
-  }
-  if (env.GITLAB_CI) {
-    return "GitLabCI";
-  }
-  if (env.BITBUCKET_BUILD_NUMBER) {
-    return "BitbucketPipelines";
-  }
-  if (env.CIRCLECI) {
-    return "CircleCI";
-  }
-  if (env.BUILDKITE) {
-    return "Buildkite";
-  }
-  if (env.TF_BUILD) {
-    return "AzurePipelines";
-  }
-  if (env.JENKINS_URL) {
-    return "Jenkins";
-  }
-  return env.CI ? "CI" : null;
-}
-function detectCiRunId(env) {
-  return normalize(env.GITHUB_RUN_ID) ?? normalize(env.CI_PIPELINE_ID) ?? normalize(env.BITBUCKET_BUILD_NUMBER) ?? normalize(env.CIRCLE_WORKFLOW_ID) ?? normalize(env.CIRCLE_BUILD_NUM) ?? normalize(env.BUILDKITE_BUILD_ID) ?? normalize(env.BUILD_BUILDID) ?? normalize(env.BUILD_TAG) ?? normalize(env.BUILD_NUMBER);
-}
-function detectBaseUrl(env) {
-  return normalizeUrl(env.TESTMUTANT_BASE_URL) ?? normalizeUrl(env.DEPLOY_URL) ?? normalizeUrl(env.URL) ?? normalizeUrl(env.VERCEL_BRANCH_URL) ?? normalizeUrl(env.VERCEL_URL) ?? normalizeUrl(env.CF_PAGES_URL) ?? normalizeUrl(env.RENDER_EXTERNAL_URL);
-}
-function detectEnvironmentName(env) {
-  return normalize(env.TESTMUTANT_ENVIRONMENT) ?? normalize(env.CI_ENVIRONMENT_NAME) ?? normalize(env.VERCEL_ENV) ?? normalize(env.NETLIFY_CONTEXT) ?? normalize(env.CF_PAGES_BRANCH);
-}
-function githubEventPullRequestNumber(env) {
-  const eventPath = normalize(env.GITHUB_EVENT_PATH);
-  if (!eventPath || !(0, import_node_fs.existsSync)(eventPath)) {
-    return null;
-  }
-  try {
-    const event = JSON.parse((0, import_node_fs.readFileSync)(eventPath, "utf8"));
-    return numberFromValue(event.pull_request?.number) ?? numberFromValue(event.number);
-  } catch {
-    return null;
-  }
-}
-function getGitRepositoryMetadata() {
-  const remote = git(["remote", "get-url", "origin"]);
-  return remote ? parseGitRemoteUrl(remote) : { provider: null, fullName: null };
-}
-function parseGitRemoteUrl(remoteUrl) {
-  const remote = remoteUrl.trim();
-  const url = parseRemoteAsUrl(remote);
-  const host = url?.host ?? parseScpRemoteHost(remote);
-  const path = url?.pathname ?? parseScpRemotePath(remote);
-  const fullName = path?.replace(/^\/+/, "").replace(/\.git$/i, "").replace(/^v\d+\//i, "");
-  return {
-    provider: host ? providerFromHost(host) : null,
-    fullName: normalize(fullName)
-  };
-}
-function parseRemoteAsUrl(remote) {
-  try {
-    return new URL(remote.replace(/^git\+/, ""));
-  } catch {
-    return null;
-  }
-}
-function parseScpRemoteHost(remote) {
-  return remote.match(/^(?:[^@]+@)?([^:]+):(.+)$/)?.[1] ?? null;
-}
-function parseScpRemotePath(remote) {
-  return remote.match(/^(?:[^@]+@)?([^:]+):(.+)$/)?.[2] ?? null;
-}
-function providerFromHost(host) {
-  const normalized = host.toLowerCase();
-  if (normalized.includes("github")) {
-    return "GitHub";
-  }
-  if (normalized.includes("gitlab")) {
-    return "GitLab";
-  }
-  if (normalized.includes("bitbucket")) {
-    return "Bitbucket";
-  }
-  if (normalized.includes("dev.azure") || normalized.includes("visualstudio")) {
-    return "AzureDevOps";
-  }
-  return null;
-}
-function branchFromGitRef(value) {
-  const ref = normalize(value);
-  if (!ref) {
-    return null;
-  }
-  return ref.match(/^refs\/heads\/(.+)$/)?.[1] ?? ref.match(/^refs\/tags\/(.+)$/)?.[1] ?? null;
-}
-function normalizeUrl(value) {
-  const normalized = normalize(value);
-  if (!normalized) {
-    return null;
-  }
-  if (/^https?:\/\//i.test(normalized)) {
-    return normalized;
-  }
-  return `https://${normalized}`;
-}
-function numberFromValue(value) {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
-    return value;
-  }
-  if (typeof value !== "string") {
-    return null;
-  }
-  if (value.toLowerCase() === "false") {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-function normalize(value) {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
-}
-function git(args) {
-  try {
-    const safeDirectory = process.cwd().replace(/\\/g, "/");
-    return normalize(
-      (0, import_node_child_process.execFileSync)("git", ["-c", `safe.directory=${safeDirectory}`, ...args], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"]
-      })
-    );
-  } catch {
-    return null;
-  }
-}
-
-// src/run-ci.ts
-init_config();
-init_playwright_runner();
+// src/cli/run-ci.ts
 async function runCi(options) {
   applyOptionEnvironmentOverrides(options);
   const config = resolveConfig({
@@ -1508,56 +2074,85 @@ async function executeAgentGenerationForApiCompletion(agentGenerator, options) {
     };
   }
 }
+var init_run_ci = __esm({
+  "src/cli/run-ci.ts"() {
+    "use strict";
+    init_api_client();
+    init_ci_metadata();
+    init_config();
+    init_playwright_runner();
+  }
+});
+
+// src/run-ci.ts
+var init_run_ci2 = __esm({
+  "src/run-ci.ts"() {
+    "use strict";
+    init_run_ci();
+  }
+});
+
+// src/github-action/action.ts
+var require_action = __commonJS({
+  "src/github-action/action.ts"() {
+    "use strict";
+    var import_node_fs2 = require("fs");
+    var import_node_path3 = require("path");
+    init_config();
+    init_run_ci2();
+    var packageInfo = readPackageInfo();
+    main().catch((error) => {
+      if (error instanceof CliError) {
+        fail(error.message);
+      }
+      if (error instanceof Error) {
+        fail(
+          process.env.TESTMUTANT_DEBUG === "1" && error.stack ? error.stack : error.message
+        );
+      }
+      fail(String(error));
+    });
+    async function main() {
+      const result = await runCi({
+        apiKey: process.env.TESTMUTANT_API_KEY,
+        apiUrl: getInput("api_url"),
+        runKind: getInput("run_kind") ?? "Advisory",
+        repository: getInput("repository"),
+        provider: getInput("provider") ?? "GitHub",
+        baseUrl: getInput("base_url"),
+        environmentName: getInput("environment_name"),
+        testSpecId: getInput("test_spec_id"),
+        userAgent: `testmutant-action/${packageInfo.version}`
+      });
+      console.log("TestMutant run completed.");
+      console.log(`Run ID: ${result.runId}`);
+      console.log(`Status: ${result.status}`);
+      console.log(
+        `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`
+      );
+    }
+    function getInput(name) {
+      const value = process.env[`INPUT_${name.toUpperCase()}`];
+      return value?.trim() ? value.trim() : void 0;
+    }
+    function fail(message) {
+      console.error(message);
+      console.error(`::error::${escapeGithubAnnotation(message)}`);
+      process.exit(1);
+    }
+    function escapeGithubAnnotation(value) {
+      return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+    }
+    function readPackageInfo() {
+      const packageJsonPath = (0, import_node_path3.join)(__dirname, "..", "package.json");
+      const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
+      return {
+        name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
+        version: typeof packageJson.version === "string" ? packageJson.version : "0.0.0"
+      };
+    }
+  }
+});
 
 // src/action.ts
-var packageInfo = readPackageInfo();
-main().catch((error) => {
-  if (error instanceof CliError) {
-    fail(error.message);
-  }
-  if (error instanceof Error) {
-    fail(
-      process.env.TESTMUTANT_DEBUG === "1" && error.stack ? error.stack : error.message
-    );
-  }
-  fail(String(error));
-});
-async function main() {
-  const result = await runCi({
-    apiKey: process.env.TESTMUTANT_API_KEY,
-    apiUrl: getInput("api_url"),
-    runKind: getInput("run_kind") ?? "Advisory",
-    repository: getInput("repository"),
-    provider: getInput("provider") ?? "GitHub",
-    baseUrl: getInput("base_url"),
-    environmentName: getInput("environment_name"),
-    testSpecId: getInput("test_spec_id"),
-    userAgent: `testmutant-action/${packageInfo.version}`
-  });
-  console.log("TestMutant run completed.");
-  console.log(`Run ID: ${result.runId}`);
-  console.log(`Status: ${result.status}`);
-  console.log(
-    `Tests: ${result.passedTests}/${result.totalTests} passed, ${result.failedTests} failed`
-  );
-}
-function getInput(name) {
-  const value = process.env[`INPUT_${name.toUpperCase()}`];
-  return value?.trim() ? value.trim() : void 0;
-}
-function fail(message) {
-  console.error(message);
-  console.error(`::error::${escapeGithubAnnotation(message)}`);
-  process.exit(1);
-}
-function escapeGithubAnnotation(value) {
-  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
-}
-function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path3.join)(__dirname, "..", "package.json");
-  const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
-  return {
-    name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
-    version: typeof packageJson.version === "string" ? packageJson.version : "0.0.0"
-  };
-}
+var import_action = __toESM(require_action());

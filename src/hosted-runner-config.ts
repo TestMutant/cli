@@ -1,17 +1,17 @@
-import type { components } from "./generated/api";
 import { API_URL_ENV_VAR, CliError, DEFAULT_API_URL } from "./config";
 import type { EnvironmentCheckContext } from "./environment-check";
 import { AuthMode } from "./environment-check";
-
-export type HostedRunnerPayload = components["schemas"]["HostedRunnerPayload"];
-export type HostedRunnerProjectContext = components["schemas"]["HostedRunnerProjectContext"];
-export type HostedRunnerEnvironmentContext = components["schemas"]["HostedRunnerEnvironmentContext"];
-export type HostedRunnerAuthInstructions = components["schemas"]["HostedRunnerAuthInstructions"];
-export type HostedRunnerTestSource = components["schemas"]["HostedRunnerTestSource"];
-export type HostedRunnerTestDefinition = components["schemas"]["HostedRunnerTestDefinition"];
-export type HostedRunnerLimits = components["schemas"]["HostedRunnerLimits"];
-export type HostedRunnerArtifactUploadInstructions =
-  components["schemas"]["HostedRunnerArtifactUploadInstructions"];
+export type {
+  HostedRunnerArtifactUploadInstructions,
+  HostedRunnerAuthInstructions,
+  HostedRunnerEnvironmentContext,
+  HostedRunnerLimits,
+  HostedRunnerPayload,
+  HostedRunnerProjectContext,
+  HostedRunnerTestDefinition,
+  HostedRunnerTestSource,
+} from "./api-client/types";
+import type { HostedRunnerPayload } from "./api-client/types";
 
 export const HOSTED_RUNNER_JOB_ID_ENV_VAR = "TESTMUTANT_HOSTED_RUNNER_JOB_ID";
 export const ORGANIZATION_ID_ENV_VAR = "TESTMUTANT_ORGANIZATION_ID";
