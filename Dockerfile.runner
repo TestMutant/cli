@@ -1,0 +1,16 @@
+FROM mcr.microsoft.com/playwright:v1.60.0-noble
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV TESTMUTANT_RUNNER_HOST=0.0.0.0
+ENV TESTMUTANT_RUNNER_PORT=8080
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY dist ./dist
+
+EXPOSE 8080
+
+CMD ["node", "dist/index.js", "runner-service"]

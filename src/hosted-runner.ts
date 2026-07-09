@@ -156,7 +156,7 @@ export async function runHostedRunner(
       result = await agentGenerator({
         apiUrl: config.apiUrl,
         apiKey: config.sessionToken,
-        timeoutMs: config.limits.runTimeoutSeconds * 1000,
+        timeoutMs: hostedAgentTimeoutMs(config),
         userAgent: "testmutant-hosted-runner",
         runId: config.runId,
         baseUrl,
@@ -328,6 +328,10 @@ export async function runHostedRunner(
 function isGenerationRun(runKind: unknown): boolean {
   return runKind === RunKind.Generation
     || String(runKind).toLowerCase() === "generation";
+}
+
+function hostedAgentTimeoutMs(config: HostedRunnerConfig): number {
+  return Math.max(30_000, Math.max(1, Number(config.limits.runTimeoutSeconds)) * 1000);
 }
 
 function createHeartbeatMonitor(

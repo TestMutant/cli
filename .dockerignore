@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+tests
+src
+docs
+.env
+npm-debug.log*
+Dockerfile*
+!Dockerfile.runner

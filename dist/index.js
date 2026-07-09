@@ -91,8 +91,8 @@ var init_config = __esm({
 // src/playwright-install.ts
 async function ensurePlaywrightBrowserInstalled() {
   const runtimeRequire = (0, import_node_module.createRequire)(__filename);
-  const playwrightCliPath = (0, import_node_path.join)(
-    (0, import_node_path.dirname)(runtimeRequire.resolve("playwright/package.json")),
+  const playwrightCliPath = (0, import_node_path3.join)(
+    (0, import_node_path3.dirname)(runtimeRequire.resolve("playwright/package.json")),
     "cli.js"
   );
   const args = process.platform === "linux" ? [playwrightCliPath, "install", "--with-deps", "chromium"] : [playwrightCliPath, "install", "chromium"];
@@ -104,8 +104,8 @@ async function ensurePlaywrightBrowserInstalled() {
   }
 }
 function execNode(args) {
-  return new Promise((resolve) => {
-    (0, import_node_child_process2.execFile)(
+  return new Promise((resolve2) => {
+    (0, import_node_child_process.execFile)(
       process.execPath,
       args,
       {
@@ -113,23 +113,23 @@ function execNode(args) {
       },
       (error, stdout, stderr) => {
         const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-        resolve({ exitCode, stdout, stderr });
+        resolve2({ exitCode, stdout, stderr });
       }
     );
   });
 }
-var import_node_child_process2, import_node_module, import_node_path;
+var import_node_child_process, import_node_module, import_node_path3;
 var init_playwright_install = __esm({
   "src/playwright-install.ts"() {
     "use strict";
-    import_node_child_process2 = require("child_process");
+    import_node_child_process = require("child_process");
     import_node_module = require("module");
-    import_node_path = require("path");
+    import_node_path3 = require("path");
     init_config();
   }
 });
 
-// src/playwright-runner.ts
+// src/runner-core/playwright-execution.ts
 async function runPlaywrightTests(tests, options = {}) {
   const supported = tests.filter(isPlaywrightTest);
   const unsupported = tests.filter((test) => !isPlaywrightTest(test));
@@ -147,7 +147,7 @@ async function runPlaywrightTests(tests, options = {}) {
   if (supported.length === 0) {
     return summarize(options.baseUrl ?? null, unsupportedResults);
   }
-  const workDir = await (0, import_promises.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "testmutant-playwright-"));
+  const workDir = await (0, import_promises2.mkdtemp)((0, import_node_path4.join)((0, import_node_os2.tmpdir)(), "testmutant-playwright-"));
   try {
     const writtenTests = await writePlaywrightWorkspace(
       workDir,
@@ -173,14 +173,15 @@ async function runPlaywrightTests(tests, options = {}) {
       writtenTests,
       result,
       workDir,
-      options.captureRepairFeedback === true
+      options.captureRepairFeedback === true,
+      options.captureStepEvidence === true
     );
     return summarize(options.baseUrl ?? null, [
       ...mappedResults,
       ...unsupportedResults
     ]);
   } finally {
-    await (0, import_promises.rm)(workDir, { recursive: true, force: true });
+    await (0, import_promises2.rm)(workDir, { recursive: true, force: true });
   }
 }
 function isPlaywrightTest(test) {
@@ -191,8 +192,9 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
   const perTestTimeoutMs = options.perTestTimeoutMs ?? 3e4;
   const traceMode = options.traceMode ?? "off";
   const videoMode = options.videoMode ?? "off";
-  await (0, import_promises.writeFile)(
-    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
+  const captureStepEvidence = options.captureStepEvidence === true;
+  await (0, import_promises2.writeFile)(
+    (0, import_node_path4.join)(workDir, "playwright.config.cjs"),
     [
       "module.exports = {",
       `  timeout: ${perTestTimeoutMs},`,
@@ -209,19 +211,27 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
     ].join("\n"),
     "utf8"
   );
+  if (captureStepEvidence) {
+    await (0, import_promises2.writeFile)(
+      (0, import_node_path4.join)(workDir, STEP_RECORDER_FILE_NAME),
+      TESTMUTANT_STEP_RECORDER_SOURCE,
+      "utf8"
+    );
+  }
   const writtenTests = [];
   for (let index = 0; index < tests.length; index += 1) {
     const test = tests[index];
     const fileName = `${String(index + 1).padStart(3, "0")}-${safeFilePart(
       test.implementationId
     )}.spec.ts`;
-    const filePath = (0, import_node_path2.join)(workDir, fileName);
-    await (0, import_promises.writeFile)(filePath, test.source, "utf8");
+    const filePath = (0, import_node_path4.join)(workDir, fileName);
+    const source = captureStepEvidence ? instrumentPlaywrightTestSource(test.source) : test.source;
+    await (0, import_promises2.writeFile)(filePath, source, "utf8");
     writtenTests.push({ test, filePath, fileName });
   }
   return writtenTests;
 }
-async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback) {
+async function mapPlaywrightResults(writtenTests, commandResult, workDir, captureRepairFeedback, captureStepEvidence) {
   const report = parsePlaywrightReport(commandResult.stdout);
   const fileResults = /* @__PURE__ */ new Map();
   const fallbackError = firstReportError(report) ?? meaningfulStderr(commandResult.stderr) ?? extractUsefulPlaywrightFailure(commandResult.stdout);
@@ -232,7 +242,9 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir, captur
         writtenTests,
         fileResults,
         fallbackError,
-        captureRepairFeedback
+        captureRepairFeedback,
+        captureStepEvidence,
+        workDir
       );
     }
   }
@@ -254,7 +266,7 @@ async function mapPlaywrightResults(writtenTests, commandResult, workDir, captur
     };
   });
 }
-async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback) {
+async function collectSuiteResults(suite, writtenTests, fileResults, fallbackError, captureRepairFeedback, captureStepEvidence, workDir) {
   const fileName = suite.file ? suite.file.replace(/\\/g, "/").split("/").pop() : null;
   const writtenTest = fileName ? writtenTests.find((candidate) => candidate.fileName === fileName) : void 0;
   if (writtenTest && fileName) {
@@ -264,16 +276,25 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
     const result = failedCase?.results?.find(
       (caseResult) => caseResult.status && caseResult.status !== "passed"
     );
+    const primaryResult = result ?? specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).find(Boolean);
     const isFailed = Boolean(failedSpec || failedCase);
     let screenshotBuffer = null;
     let traceBuffer = null;
     let videoBuffer = null;
+    if (primaryResult) {
+      traceBuffer = await readAttachmentByName(primaryResult, "trace", workDir);
+      videoBuffer = await readAttachmentByName(primaryResult, "video", workDir);
+    }
     if (isFailed && result) {
-      screenshotBuffer = await readScreenshotAttachment(result);
-      traceBuffer = await readAttachmentByName(result, "trace");
-      videoBuffer = await readAttachmentByName(result, "video");
+      screenshotBuffer = await readScreenshotAttachment(result, workDir);
     }
     const repairFeedback = captureRepairFeedback && isFailed ? extractRepairFeedback(failedSpec, result) : void 0;
+    const evidence = captureStepEvidence && primaryResult ? await readStepEvidence(
+      primaryResult,
+      workDir,
+      writtenTest.test.source,
+      formatResultError(result) ?? fallbackError
+    ) : void 0;
     fileResults.set(fileName, {
       implementationId: writtenTest.test.implementationId,
       runnerKind: writtenTest.test.runnerKind,
@@ -284,7 +305,8 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       screenshotBuffer,
       traceBuffer,
       videoBuffer,
-      ...repairFeedback ? { repairFeedback } : {}
+      ...repairFeedback ? { repairFeedback } : {},
+      ...evidence ? { evidence } : {}
     });
   }
   for (const child of suite.suites ?? []) {
@@ -293,14 +315,16 @@ async function collectSuiteResults(suite, writtenTests, fileResults, fallbackErr
       writtenTests,
       fileResults,
       fallbackError,
-      captureRepairFeedback
+      captureRepairFeedback,
+      captureStepEvidence,
+      workDir
     );
   }
 }
-async function readScreenshotAttachment(result) {
-  return readAttachmentByName(result, "screenshot");
+async function readScreenshotAttachment(result, workDir) {
+  return readAttachmentByName(result, "screenshot", workDir);
 }
-async function readAttachmentByName(result, name) {
+async function readAttachmentByName(result, name, workDir) {
   const attachment = result.attachments?.find(
     (a) => a.name === name && a.path
   );
@@ -308,10 +332,214 @@ async function readAttachmentByName(result, name) {
     return null;
   }
   try {
-    return await (0, import_promises.readFile)(attachment.path);
+    return await (0, import_promises2.readFile)(resolveAttachmentPath(attachment.path, workDir));
   } catch {
     return null;
   }
+}
+async function readStepEvidence(result, workDir, source, errorMessage) {
+  const recorderEvidence = await readRecorderEvidence(result, workDir);
+  const sourceContext = buildSourceContext(source, errorMessage);
+  if (recorderEvidence) {
+    return {
+      schemaVersion: 1,
+      source: "testmutant-playwright-step-snapshot",
+      steps: await buildRecordedEvidenceSteps(result, recorderEvidence, workDir),
+      console: {
+        entries: normalizeConsoleEntries(recorderEvidence.console?.entries),
+        capped: recorderEvidence.console?.capped === true
+      },
+      network: {
+        entries: normalizeNetworkEntries(recorderEvidence.network?.entries),
+        capped: recorderEvidence.network?.capped === true
+      },
+      sourceContext,
+      caps: {
+        maxSteps: recorderEvidence.caps?.maxSteps ?? MAX_EVIDENCE_STEPS,
+        maxConsoleEntries: recorderEvidence.caps?.maxConsoleEntries ?? MAX_CONSOLE_ENTRIES,
+        maxNetworkEntries: recorderEvidence.caps?.maxNetworkEntries ?? MAX_NETWORK_ENTRIES
+      },
+      redaction: {
+        headers: recorderEvidence.redaction?.headers ?? [
+          "authorization",
+          "cookie",
+          "set-cookie",
+          "x-api-key"
+        ],
+        queryParameters: recorderEvidence.redaction?.queryParameters ?? [
+          "token",
+          "secret",
+          "password",
+          "key",
+          "code",
+          "state",
+          "session"
+        ],
+        logs: recorderEvidence.redaction?.logs ?? true,
+        screenshots: recorderEvidence.redaction?.screenshots ?? "Sensitive input fields are masked before screenshot capture where selectors can be detected."
+      },
+      reporterFallback: false
+    };
+  }
+  return {
+    schemaVersion: 1,
+    source: "testmutant-playwright-step-snapshot",
+    steps: buildReporterEvidenceSteps(result.steps),
+    console: { entries: [], capped: false },
+    network: { entries: [], capped: false },
+    sourceContext,
+    caps: {
+      maxSteps: MAX_EVIDENCE_STEPS,
+      maxConsoleEntries: MAX_CONSOLE_ENTRIES,
+      maxNetworkEntries: MAX_NETWORK_ENTRIES
+    },
+    redaction: {
+      headers: ["authorization", "cookie", "set-cookie", "x-api-key"],
+      queryParameters: [
+        "token",
+        "secret",
+        "password",
+        "key",
+        "code",
+        "state",
+        "session"
+      ],
+      logs: true,
+      screenshots: "No step screenshots were captured from reporter step data."
+    },
+    reporterFallback: true
+  };
+}
+async function readRecorderEvidence(result, workDir) {
+  const attachment = result.attachments?.find(
+    (a) => a.name === EVIDENCE_ATTACHMENT_NAME && a.path
+  );
+  if (!attachment?.path) {
+    return null;
+  }
+  try {
+    return JSON.parse(
+      await (0, import_promises2.readFile)(resolveAttachmentPath(attachment.path, workDir), "utf8")
+    );
+  } catch {
+    return null;
+  }
+}
+async function buildRecordedEvidenceSteps(result, evidence, workDir) {
+  const steps = [];
+  for (const [position, step] of (evidence.steps ?? []).entries()) {
+    if (steps.length >= MAX_EVIDENCE_STEPS) {
+      break;
+    }
+    const screenshotBuffer = step.screenshotAttachmentName ? await readAttachmentByName(result, step.screenshotAttachmentName, workDir) : null;
+    steps.push({
+      index: coercePositiveInt(step.index, position + 1),
+      title: truncate(firstNonEmpty(step.title) ?? `Step ${position + 1}`, 200),
+      status: step.status === "Failed" ? "Failed" : "Passed",
+      durationMs: coerceNullableNumber(step.durationMs),
+      errorMessage: firstNonEmpty(step.errorMessage),
+      startedAtMs: coerceNullableNumber(step.startedAtMs),
+      completedAtMs: coerceNullableNumber(step.completedAtMs),
+      screenshotBuffer,
+      screenshotFileName: firstNonEmpty(step.screenshotFileName),
+      consoleStartIndex: coerceNonNegativeInt(step.consoleStartIndex, 0),
+      consoleEndIndex: coerceNonNegativeInt(step.consoleEndIndex, 0),
+      networkStartIndex: coerceNonNegativeInt(step.networkStartIndex, 0),
+      networkEndIndex: coerceNonNegativeInt(step.networkEndIndex, 0)
+    });
+  }
+  return steps;
+}
+function buildReporterEvidenceSteps(steps) {
+  const flattened = flattenPlaywrightSteps(steps).slice(0, MAX_EVIDENCE_STEPS);
+  return flattened.map((step, index) => ({
+    index: index + 1,
+    title: truncate(firstNonEmpty(step.title) ?? `Step ${index + 1}`, 200),
+    status: step.error ? "Failed" : "Passed",
+    durationMs: coerceNullableNumber(step.duration),
+    errorMessage: step.error ? formatError(step.error) : null,
+    startedAtMs: null,
+    completedAtMs: null,
+    screenshotBuffer: null,
+    screenshotFileName: null,
+    consoleStartIndex: 0,
+    consoleEndIndex: 0,
+    networkStartIndex: 0,
+    networkEndIndex: 0
+  }));
+}
+function flattenPlaywrightSteps(steps) {
+  const flattened = [];
+  for (const step of steps ?? []) {
+    if (step.category === "test.step") {
+      flattened.push(step);
+    }
+    flattened.push(...flattenPlaywrightSteps(step.steps));
+  }
+  return flattened;
+}
+function normalizeConsoleEntries(entries) {
+  return (entries ?? []).slice(0, MAX_CONSOLE_ENTRIES).map((entry) => ({
+    timestampMs: coerceNullableNumber(entry.timestampMs),
+    type: truncate(firstNonEmpty(entry.type) ?? "log", 40),
+    text: truncate(firstNonEmpty(entry.text) ?? "", 1e3)
+  }));
+}
+function normalizeNetworkEntries(entries) {
+  return (entries ?? []).slice(0, MAX_NETWORK_ENTRIES).map((entry) => ({
+    timestampMs: coerceNullableNumber(entry.timestampMs),
+    event: entry.event === "response" || entry.event === "requestfailed" ? entry.event : "request",
+    method: firstNonEmpty(entry.method),
+    url: truncate(firstNonEmpty(entry.url) ?? "", 1e3),
+    resourceType: firstNonEmpty(entry.resourceType),
+    status: coerceNullableNumber(entry.status),
+    failureText: firstNonEmpty(entry.failureText)
+  }));
+}
+function buildSourceContext(source, errorMessage) {
+  const failureLine = findFailureLine(errorMessage);
+  const lines = source.split(/\r?\n/);
+  const excerpt = failureLine ? lines.slice(Math.max(0, failureLine - 7), Math.min(lines.length, failureLine + 6)).map((line, index) => {
+    const lineNumber = Math.max(0, failureLine - 7) + index + 1;
+    return `${String(lineNumber).padStart(4, " ")} | ${line}`;
+  }).join("\n") : truncate(source, 6e3);
+  return {
+    language: "typescript",
+    excerpt,
+    failureLine
+  };
+}
+function findFailureLine(errorMessage) {
+  const match = errorMessage?.match(/\.spec\.ts:(\d+):\d+/);
+  if (!match) {
+    return null;
+  }
+  const line = Number(match[1]);
+  return Number.isInteger(line) && line > 0 ? line : null;
+}
+function resolveAttachmentPath(path, workDir) {
+  return (0, import_node_path4.isAbsolute)(path) ? path : (0, import_node_path4.join)(workDir, path);
+}
+function instrumentPlaywrightTestSource(source) {
+  return source.replace(
+    /from\s+(['"])@playwright\/test\1/g,
+    `from "./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}"`
+  ).replace(
+    /require\(\s*(['"])@playwright\/test\1\s*\)/g,
+    `require("./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}")`
+  );
+}
+function coerceNullableNumber(value) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function coercePositiveInt(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+function coerceNonNegativeInt(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 function parsePlaywrightReport(stdout) {
   try {
@@ -334,7 +562,7 @@ function formatResultError(result) {
   return error ? formatError(error) : null;
 }
 function formatError(error) {
-  return truncate2(firstNonEmpty(error.message, error.stack) ?? "Playwright test failed.");
+  return truncate(firstNonEmpty(error.message, error.stack) ?? "Playwright test failed.");
 }
 function sumDurations(specs) {
   const duration = specs.flatMap((spec) => spec.tests ?? []).flatMap((testCase) => testCase.results ?? []).reduce((total, result) => total + (result.duration ?? 0), 0);
@@ -418,7 +646,7 @@ function normalizeFeedbackLines(values) {
   for (const value of values) {
     const text = firstNonEmpty(value);
     if (text) {
-      normalized.add(truncate2(text, 300));
+      normalized.add(truncate(text, 300));
     }
     if (normalized.size >= 20) {
       break;
@@ -440,12 +668,12 @@ function summarize(baseUrl, tests) {
 }
 function getPlaywrightCliPath() {
   const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
-  return (0, import_node_path2.join)((0, import_node_path2.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
+  return (0, import_node_path4.join)((0, import_node_path4.dirname)(runtimeRequire.resolve("playwright/package.json")), "cli.js");
 }
 function buildNodePath(existing) {
   const runtimeRequire = (0, import_node_module2.createRequire)(__filename);
-  const dependencyPath = (0, import_node_path2.dirname)(
-    (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
+  const dependencyPath = (0, import_node_path4.dirname)(
+    (0, import_node_path4.dirname)((0, import_node_path4.dirname)(runtimeRequire.resolve("@playwright/test")))
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
 }
@@ -476,7 +704,7 @@ function getPlaywrightTestArgs(workDir, writtenTests) {
     getPlaywrightCliPath(),
     "test",
     "--config",
-    (0, import_node_path2.join)(workDir, "playwright.config.cjs"),
+    (0, import_node_path4.join)(workDir, "playwright.config.cjs"),
     "--reporter=json",
     ...writtenTests.map((writtenTest) => writtenTest.fileName)
   ];
@@ -494,7 +722,7 @@ function meaningfulStderr(stderr) {
     }
     return true;
   });
-  return lines.length > 0 ? truncate2(lines.join("\n")) : null;
+  return lines.length > 0 ? truncate(lines.join("\n")) : null;
 }
 function extractUsefulPlaywrightFailure(stdout) {
   const report = parsePlaywrightReport(stdout);
@@ -505,7 +733,7 @@ function extractUsefulPlaywrightFailure(stdout) {
   for (const suite of report.suites ?? []) {
     collectFailureMessages(suite, errors);
   }
-  return errors.length > 0 ? truncate2(errors.join("\n\n")) : null;
+  return errors.length > 0 ? truncate(errors.join("\n\n")) : null;
 }
 function collectFailureMessages(suite, errors) {
   for (const spec of suite.specs ?? []) {
@@ -527,8 +755,8 @@ function delimiter() {
   return process.platform === "win32" ? ";" : ":";
 }
 function defaultCommandRunner(command, args, options) {
-  return new Promise((resolve) => {
-    const child = (0, import_node_child_process3.execFile)(
+  return new Promise((resolve2) => {
+    const child = (0, import_node_child_process2.execFile)(
       command,
       args,
       {
@@ -538,7 +766,7 @@ function defaultCommandRunner(command, args, options) {
       },
       (error, stdout, stderr) => {
         const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-        resolve({
+        resolve2({
           exitCode,
           stdout,
           stderr
@@ -565,25 +793,355 @@ function firstNonEmpty(...values) {
   for (const value of values) {
     const trimmed = value?.trim();
     if (trimmed) {
-      return truncate2(trimmed);
+      return truncate(trimmed);
     }
   }
   return null;
 }
-function truncate2(value, maxLength = 1e3) {
+function truncate(value, maxLength = 1e3) {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
-var import_node_child_process3, import_promises, import_node_os, import_node_path2, import_node_module2, PLAYWRIGHT_TYPE;
-var init_playwright_runner = __esm({
-  "src/playwright-runner.ts"() {
+var import_node_child_process2, import_promises2, import_node_os2, import_node_path4, import_node_module2, PLAYWRIGHT_TYPE, EVIDENCE_ATTACHMENT_NAME, MAX_EVIDENCE_STEPS, MAX_CONSOLE_ENTRIES, MAX_NETWORK_ENTRIES, STEP_RECORDER_FILE_NAME, TESTMUTANT_STEP_RECORDER_SOURCE;
+var init_playwright_execution = __esm({
+  "src/runner-core/playwright-execution.ts"() {
     "use strict";
-    import_node_child_process3 = require("child_process");
-    import_promises = require("fs/promises");
-    import_node_os = require("os");
-    import_node_path2 = require("path");
+    import_node_child_process2 = require("child_process");
+    import_promises2 = require("fs/promises");
+    import_node_os2 = require("os");
+    import_node_path4 = require("path");
     init_playwright_install();
     import_node_module2 = require("module");
     PLAYWRIGHT_TYPE = "playwright";
+    EVIDENCE_ATTACHMENT_NAME = "testmutant-evidence";
+    MAX_EVIDENCE_STEPS = 60;
+    MAX_CONSOLE_ENTRIES = 100;
+    MAX_NETWORK_ENTRIES = 120;
+    STEP_RECORDER_FILE_NAME = "testmutant-step-recorder.ts";
+    TESTMUTANT_STEP_RECORDER_SOURCE = String.raw`
+import { AsyncLocalStorage } from "node:async_hooks";
+import { writeFile } from "node:fs/promises";
+import { test as base, expect, type Page, type TestInfo } from "@playwright/test";
+export * from "@playwright/test";
+
+type EvidenceStatus = "Passed" | "Failed";
+type ConsoleEntry = { timestampMs: number; type: string; text: string };
+type NetworkEntry = {
+  timestampMs: number;
+  event: "request" | "response" | "requestfailed";
+  method: string | null;
+  url: string;
+  resourceType: string | null;
+  status: number | null;
+  failureText: string | null;
+};
+type StepEntry = {
+  index: number;
+  title: string;
+  status: EvidenceStatus;
+  durationMs: number;
+  errorMessage: string | null;
+  startedAtMs: number;
+  completedAtMs: number;
+  screenshotAttachmentName: string | null;
+  screenshotFileName: string | null;
+  consoleStartIndex: number;
+  consoleEndIndex: number;
+  networkStartIndex: number;
+  networkEndIndex: number;
+};
+type EvidenceContext = {
+  page: Page;
+  testInfo: TestInfo;
+  startedAtMs: number;
+  nextStepIndex: number;
+  steps: StepEntry[];
+  stepsCapped: boolean;
+  console: ConsoleEntry[];
+  consoleCapped: boolean;
+  network: NetworkEntry[];
+  networkCapped: boolean;
+};
+
+const EVIDENCE_ATTACHMENT_NAME = "testmutant-evidence";
+const STEP_SCREENSHOT_ATTACHMENT_PREFIX = "testmutant-step-screenshot-";
+const MAX_STEPS = 60;
+const MAX_CONSOLE = 100;
+const MAX_NETWORK = 120;
+const REDACTED = "[REDACTED]";
+const SENSITIVE_QUERY_NAMES = /token|secret|password|pass|key|code|state|session|cookie|auth/i;
+const SENSITIVE_SCREENSHOT_SELECTOR = [
+  "input[type='password']",
+  "input[name*='password' i]",
+  "input[name*='token' i]",
+  "input[name*='secret' i]",
+  "input[name*='key' i]",
+  "input[name*='code' i]",
+  "input[name*='card' i]",
+  "input[id*='password' i]",
+  "input[id*='token' i]",
+  "input[id*='secret' i]",
+  "input[id*='key' i]",
+  "input[id*='card' i]",
+  "textarea[name*='secret' i]",
+  "textarea[name*='token' i]"
+].join(", ");
+
+const storage = new AsyncLocalStorage<EvidenceContext>();
+
+const test = base.extend<{ _testmutantEvidence: void }>({
+  _testmutantEvidence: [async ({ page }, use, testInfo) => {
+    const context: EvidenceContext = {
+      page,
+      testInfo,
+      startedAtMs: Date.now(),
+      nextStepIndex: 1,
+      steps: [],
+      stepsCapped: false,
+      console: [],
+      consoleCapped: false,
+      network: [],
+      networkCapped: false
+    };
+
+    attachPageEvents(page, context);
+    await storage.run(context, async () => {
+      try {
+        await use();
+      } finally {
+        await attachEvidence(context);
+      }
+    });
+  }, { auto: true }]
+});
+
+const originalStep = base.step.bind(base);
+const recordedStep = (async (title: string, body: (...args: unknown[]) => unknown, options?: unknown) => {
+  const context = storage.getStore();
+  if (!context) {
+    return originalStep(title, body as never, options as never);
+  }
+
+  const index = context.nextStepIndex++;
+  const started = Date.now();
+  const consoleStartIndex = context.console.length;
+  const networkStartIndex = context.network.length;
+  let errorMessage: string | null = null;
+
+  return originalStep(title, async (...args: unknown[]) => {
+    try {
+      return await body(...args);
+    } catch (error) {
+      errorMessage = redact(formatError(error));
+      throw error;
+    } finally {
+      if (context.steps.length >= MAX_STEPS) {
+        context.stepsCapped = true;
+        return;
+      }
+
+      const completed = Date.now();
+      const screenshot = await captureStepScreenshot(context, index);
+      context.steps.push({
+        index,
+        title: redact(String(title)),
+        status: errorMessage ? "Failed" : "Passed",
+        durationMs: completed - started,
+        errorMessage,
+        startedAtMs: started - context.startedAtMs,
+        completedAtMs: completed - context.startedAtMs,
+        screenshotAttachmentName: screenshot.attachmentName,
+        screenshotFileName: screenshot.fileName,
+        consoleStartIndex,
+        consoleEndIndex: context.console.length,
+        networkStartIndex,
+        networkEndIndex: context.network.length
+      });
+    }
+  }, options as never);
+}) as typeof base.step;
+Object.assign(recordedStep, originalStep);
+(test as typeof base).step = recordedStep;
+
+export { expect, test };
+
+function attachPageEvents(page: Page, context: EvidenceContext): void {
+  page.on("console", (message) => {
+    pushConsole(context, {
+      timestampMs: elapsed(context),
+      type: message.type(),
+      text: redact(message.text())
+    });
+  });
+
+  page.on("pageerror", (error) => {
+    pushConsole(context, {
+      timestampMs: elapsed(context),
+      type: "pageerror",
+      text: redact(formatError(error))
+    });
+  });
+
+  page.on("request", (request) => {
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "request",
+      method: request.method(),
+      url: redactUrl(request.url()),
+      resourceType: request.resourceType(),
+      status: null,
+      failureText: null
+    });
+  });
+
+  page.on("response", (response) => {
+    const request = response.request();
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "response",
+      method: request.method(),
+      url: redactUrl(response.url()),
+      resourceType: request.resourceType(),
+      status: response.status(),
+      failureText: null
+    });
+  });
+
+  page.on("requestfailed", (request) => {
+    pushNetwork(context, {
+      timestampMs: elapsed(context),
+      event: "requestfailed",
+      method: request.method(),
+      url: redactUrl(request.url()),
+      resourceType: request.resourceType(),
+      status: null,
+      failureText: redact(request.failure()?.errorText ?? "request failed")
+    });
+  });
+}
+
+async function captureStepScreenshot(
+  context: EvidenceContext,
+  index: number,
+): Promise<{ attachmentName: string | null; fileName: string | null }> {
+  const attachmentName = STEP_SCREENSHOT_ATTACHMENT_PREFIX + String(index);
+  const fileName = attachmentName + ".png";
+  const path = context.testInfo.outputPath(fileName);
+
+  try {
+    await context.page.screenshot({
+      path,
+      fullPage: false,
+      animations: "disabled",
+      mask: [context.page.locator(SENSITIVE_SCREENSHOT_SELECTOR)]
+    });
+    await context.testInfo.attach(attachmentName, {
+      path,
+      contentType: "image/png"
+    });
+    return { attachmentName, fileName };
+  } catch {
+    return { attachmentName: null, fileName: null };
+  }
+}
+
+async function attachEvidence(context: EvidenceContext): Promise<void> {
+  const path = context.testInfo.outputPath("testmutant-evidence.json");
+  const payload = {
+    schemaVersion: 1,
+    source: "testmutant-playwright-step-snapshot",
+    steps: context.steps,
+    stepsCapped: context.stepsCapped,
+    console: {
+      entries: context.console,
+      capped: context.consoleCapped
+    },
+    network: {
+      entries: context.network,
+      capped: context.networkCapped
+    },
+    caps: {
+      maxSteps: MAX_STEPS,
+      maxConsoleEntries: MAX_CONSOLE,
+      maxNetworkEntries: MAX_NETWORK
+    },
+    redaction: {
+      headers: ["authorization", "cookie", "set-cookie", "x-api-key"],
+      queryParameters: ["token", "secret", "password", "key", "code", "state", "session"],
+      logs: true,
+      screenshots: "Sensitive input fields are masked before screenshot capture where selectors can be detected."
+    }
+  };
+
+  try {
+    await writeFile(path, JSON.stringify(payload, null, 2), "utf8");
+    await context.testInfo.attach(EVIDENCE_ATTACHMENT_NAME, {
+      path,
+      contentType: "application/json"
+    });
+  } catch {
+  }
+}
+
+function pushConsole(context: EvidenceContext, entry: ConsoleEntry): void {
+  if (context.console.length >= MAX_CONSOLE) {
+    context.consoleCapped = true;
+    return;
+  }
+
+  context.console.push(entry);
+}
+
+function pushNetwork(context: EvidenceContext, entry: NetworkEntry): void {
+  if (context.network.length >= MAX_NETWORK) {
+    context.networkCapped = true;
+    return;
+  }
+
+  context.network.push(entry);
+}
+
+function elapsed(context: EvidenceContext): number {
+  return Date.now() - context.startedAtMs;
+}
+
+function redactUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    for (const [key] of url.searchParams) {
+      if (SENSITIVE_QUERY_NAMES.test(key)) {
+        url.searchParams.set(key, REDACTED);
+      }
+    }
+    return url.toString();
+  } catch {
+    return redact(value);
+  }
+}
+
+function redact(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer " + REDACTED)
+    .replace(/\b(token|secret|password|api[_-]?key|session|cookie|authorization)\b\s*[:=]\s*["']?[^"',;\s]+/gi, "$1=" + REDACTED)
+    .replace(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED)
+    .slice(0, 1000);
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+
+  return String(error);
+}
+`;
+  }
+});
+
+// src/playwright-runner.ts
+var init_playwright_runner = __esm({
+  "src/playwright-runner.ts"() {
+    "use strict";
+    init_playwright_execution();
   }
 });
 
@@ -643,8 +1201,8 @@ async function runAgentWebSocketLoop(options, browserDriver) {
   let activeToolCalls = 0;
   let closeAfterToolCalls = false;
   let generationResult = null;
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+  await new Promise((resolve2, reject) => {
+    const timeout2 = setTimeout(() => {
       fail(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
     }, options.timeoutMs);
     const finish = () => {
@@ -653,21 +1211,21 @@ async function runAgentWebSocketLoop(options, browserDriver) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
+      clearTimeout(timeout2);
       socket.close();
-      resolve();
+      resolve2();
     };
     const fail = (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
+      clearTimeout(timeout2);
       socket.close();
       reject(error);
     };
     socket.on("open", () => {
-      sendJson(socket, { type: "runner_ready" });
+      sendJson2(socket, { type: "runner_ready" });
     });
     socket.on("message", (data) => {
       void handleMessage(data).catch(fail);
@@ -678,8 +1236,8 @@ async function runAgentWebSocketLoop(options, browserDriver) {
     socket.on("close", (_code, reason) => {
       if (!settled && activeToolCalls === 0) {
         settled = true;
-        clearTimeout(timeout);
-        resolve();
+        clearTimeout(timeout2);
+        resolve2();
         return;
       }
       closeAfterToolCalls = true;
@@ -723,7 +1281,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
 }
 async function handleToolCall(socket, browserDriver, message) {
   if (!SUPPORTED_TOOLS.has(message.name)) {
-    sendJson(socket, {
+    sendJson2(socket, {
       type: "tool_result",
       id: message.id,
       ok: false,
@@ -736,7 +1294,7 @@ async function handleToolCall(socket, browserDriver, message) {
   try {
     const observation = await browserDriver.callTool(message.name, args);
     if (isToolErrorObservation(observation)) {
-      sendJson(socket, {
+      sendJson2(socket, {
         type: "tool_result",
         id: message.id,
         ok: false,
@@ -745,14 +1303,14 @@ async function handleToolCall(socket, browserDriver, message) {
       });
       return;
     }
-    sendJson(socket, {
+    sendJson2(socket, {
       type: "tool_result",
       id: message.id,
       ok: true,
       observation: normalizeObservation(observation)
     });
   } catch (error) {
-    sendJson(socket, {
+    sendJson2(socket, {
       type: "tool_result",
       id: message.id,
       ok: false,
@@ -763,7 +1321,7 @@ async function handleToolCall(socket, browserDriver, message) {
 }
 async function createDirectPlaywrightDriver(baseUrl) {
   await ensurePlaywrightBrowserInstalled();
-  const browser = await import_playwright.chromium.launch({ headless: true });
+  const browser = await import_playwright2.chromium.launch({ headless: true });
   const page = await browser.newPage();
   return {
     async callTool(name, args) {
@@ -948,17 +1506,17 @@ function extractObservationError(value) {
   ).filter((item) => Boolean(item?.trim())).join("\n");
   return text || "Browser tool execution failed.";
 }
-function sendJson(socket, value) {
+function sendJson2(socket, value) {
   socket.send(JSON.stringify(value));
 }
 function formatApiError(message) {
   return typeof message === "string" && message.trim() ? message : "TestMutant agent generation failed.";
 }
-var import_playwright, import_ws, SUPPORTED_TOOLS;
+var import_playwright2, import_ws, SUPPORTED_TOOLS;
 var init_agent_runner = __esm({
   "src/agent-runner.ts"() {
     "use strict";
-    import_playwright = require("playwright");
+    import_playwright2 = require("playwright");
     init_config();
     init_playwright_install();
     import_ws = __toESM(require("ws"));
@@ -975,9 +1533,1125 @@ var init_agent_runner = __esm({
 });
 
 // src/index.ts
-var import_config7 = require("dotenv/config");
+var import_config8 = require("dotenv/config");
 var import_node_fs2 = require("fs");
-var import_node_path3 = require("path");
+var import_node_path6 = require("path");
+
+// src/runner-service/config.ts
+var import_node_crypto = require("crypto");
+var import_node_path = require("path");
+var import_node_os = require("os");
+function resolveRunnerServiceConfig(options, version) {
+  return {
+    host: options.host ?? process.env.TESTMUTANT_RUNNER_HOST ?? "0.0.0.0",
+    port: parseIntOption(options.port ?? process.env.TESTMUTANT_RUNNER_PORT, 8080),
+    token: nonEmpty(options.token ?? process.env.TESTMUTANT_RUNNER_TOKEN),
+    runnerInstanceId: nonEmpty(options.runnerInstanceId ?? process.env.TESTMUTANT_RUNNER_INSTANCE_ID) ?? stableLocalRunnerId(),
+    artifactDir: nonEmpty(options.artifactDir ?? process.env.TESTMUTANT_RUNNER_ARTIFACT_DIR) ?? (0, import_node_path.join)((0, import_node_os.tmpdir)(), "testmutant-runner-artifacts"),
+    maxSessions: parseIntOption(
+      options.maxSessions ?? process.env.TESTMUTANT_RUNNER_MAX_SESSIONS,
+      1
+    ),
+    sessionTimeoutMs: parseIntOption(
+      options.sessionTimeoutMs ?? process.env.TESTMUTANT_RUNNER_SESSION_TIMEOUT_MS,
+      18e5
+    ),
+    headless: parseBooleanOption(
+      options.headless ?? process.env.TESTMUTANT_RUNNER_HEADLESS,
+      true
+    ),
+    version
+  };
+}
+function parseIntOption(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+function parseBooleanOption(value, fallback) {
+  if (!value?.trim()) {
+    return fallback;
+  }
+  if (["1", "true", "yes", "on"].includes(value.trim().toLowerCase())) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(value.trim().toLowerCase())) {
+    return false;
+  }
+  return fallback;
+}
+function nonEmpty(value) {
+  const trimmed = value?.trim();
+  return trimmed || null;
+}
+function stableLocalRunnerId() {
+  return `local-${(0, import_node_crypto.randomUUID)()}`;
+}
+
+// src/runner-service/server.ts
+var import_node_http = require("http");
+
+// src/runner-service/routes.ts
+var import_node_crypto2 = require("crypto");
+
+// src/runner-core/artifacts.ts
+var import_promises = require("fs/promises");
+var import_node_path2 = require("path");
+function resolveArtifactDirectory(artifactRoot, sessionId, requestedDirectory) {
+  const root = (0, import_node_path2.resolve)(artifactRoot);
+  const fallback = (0, import_node_path2.resolve)(root, sessionId);
+  if (!requestedDirectory?.trim()) {
+    return fallback;
+  }
+  const requested = (0, import_node_path2.isAbsolute)(requestedDirectory) ? (0, import_node_path2.resolve)(requestedDirectory) : (0, import_node_path2.resolve)(root, requestedDirectory);
+  return isSubpath(root, requested) ? requested : fallback;
+}
+async function writeArtifact(artifactDirectory, kind, preferredFileName, contentType, data) {
+  await (0, import_promises.mkdir)(artifactDirectory, { recursive: true });
+  const fileName = safeFileName(preferredFileName, defaultExtension(contentType));
+  const path = (0, import_node_path2.join)(artifactDirectory, fileName);
+  await (0, import_promises.writeFile)(path, data);
+  const sizeBytes = (await (0, import_promises.stat)(path)).size;
+  return {
+    kind,
+    path,
+    fileName,
+    contentType,
+    sizeBytes
+  };
+}
+function safeFileName(value, extension) {
+  const candidate = (0, import_node_path2.basename)(value?.trim() || `artifact-${Date.now()}${extension}`);
+  const sanitized = candidate.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 128);
+  return sanitized || `artifact-${Date.now()}${extension}`;
+}
+function artifactKindFromAttachment(name) {
+  if (name === "trace") {
+    return { kind: "trace", extension: ".zip", contentType: "application/zip" };
+  }
+  if (name === "video") {
+    return { kind: "video", extension: ".webm", contentType: "video/webm" };
+  }
+  return { kind: "screenshot", extension: ".png", contentType: "image/png" };
+}
+function defaultExtension(contentType) {
+  if (contentType === "image/png") {
+    return ".png";
+  }
+  if (contentType === "application/zip") {
+    return ".zip";
+  }
+  if (contentType === "video/webm") {
+    return ".webm";
+  }
+  return (0, import_node_path2.extname)(contentType) || ".bin";
+}
+function isSubpath(parent, child) {
+  const normalizedParent = parent.endsWith("\\") ? parent : `${parent}\\`;
+  return child === parent || child.startsWith(normalizedParent);
+}
+
+// src/runner-core/playwright-runner-adapter.ts
+var import_node_path5 = require("path");
+init_playwright_execution();
+async function executeRunnerTests(request, options) {
+  const summary = await runPlaywrightTests(
+    request.tests.map(toCoreTestDefinition),
+    {
+      baseUrl: request.baseUrl,
+      perTestTimeoutMs: toNumber(request.perTestTimeoutMs) ?? void 0,
+      traceMode: "retain-on-failure",
+      videoMode: "retain-on-failure",
+      captureRepairFeedback: true,
+      captureStepEvidence: true,
+      signal: options.signal
+    }
+  );
+  return toRunnerSummary(summary, request.tests, options.artifactDirectory);
+}
+async function validateDraftPlaywrightTest(request, options) {
+  const test = {
+    testId: "generated-draft",
+    testSpecId: null,
+    name: request.name,
+    runnerKind: "playwright",
+    source: request.source,
+    metadata: null
+  };
+  const summary = await executeRunnerTests(
+    {
+      baseUrl: request.baseUrl,
+      tests: [test],
+      perTestTimeoutMs: request.timeoutMs,
+      runTimeoutMs: null,
+      artifactDirectory: null
+    },
+    options
+  );
+  const failure = summary.tests.find(
+    (candidate) => candidate.status !== "Passed"
+  );
+  return {
+    passed: toNumber(summary.failed) === 0 && toNumber(summary.errored) === 0 && (toNumber(summary.total) ?? 0) > 0,
+    summary,
+    failureExcerpt: failure?.errorMessage ?? null,
+    artifacts: summary.tests.flatMap((candidate) => candidate.artifacts)
+  };
+}
+async function toRunnerSummary(summary, definitions, artifactDirectory) {
+  const definitionById = new Map(definitions.map((test) => [test.testId, test]));
+  const tests = await Promise.all(
+    summary.tests.map(
+      (test) => toRunnerTestResult(test, definitionById.get(test.implementationId), artifactDirectory)
+    )
+  );
+  return {
+    kind: "playwright",
+    baseUrl: summary.baseUrl,
+    total: summary.total,
+    passed: summary.passed,
+    failed: tests.filter((test) => test.status === "Failed").length,
+    skipped: tests.filter((test) => test.status === "Skipped").length,
+    errored: tests.filter((test) => test.status === "Errored").length,
+    tests
+  };
+}
+async function toRunnerTestResult(test, definition, artifactDirectory) {
+  return {
+    testId: test.implementationId,
+    testSpecId: definition?.testSpecId ?? null,
+    name: test.name,
+    runnerKind: test.runnerKind,
+    status: test.status,
+    durationMs: test.durationMs,
+    errorMessage: test.errorMessage,
+    repairFeedback: test.repairFeedback ?? null,
+    artifacts: await writeTestArtifacts(test, artifactDirectory)
+  };
+}
+async function writeTestArtifacts(test, artifactDirectory) {
+  const artifacts = [];
+  const prefix = test.implementationId.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 64) || "test";
+  for (const [name, buffer] of [
+    ["screenshot", test.screenshotBuffer],
+    ["trace", test.traceBuffer],
+    ["video", test.videoBuffer]
+  ]) {
+    if (!buffer) {
+      continue;
+    }
+    const descriptor = artifactKindFromAttachment(name);
+    artifacts.push(
+      await writeArtifact(
+        (0, import_node_path5.join)(artifactDirectory, prefix),
+        descriptor.kind,
+        `${prefix}-${descriptor.kind}${descriptor.extension}`,
+        descriptor.contentType,
+        buffer
+      )
+    );
+  }
+  return artifacts;
+}
+function toCoreTestDefinition(test) {
+  return {
+    implementationId: test.testId,
+    testSpecId: test.testSpecId,
+    runnerKind: test.runnerKind,
+    name: test.name,
+    source: test.source
+  };
+}
+function toNumber(value) {
+  if (value === null || value === void 0 || value === "") {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// src/runner-service/errors.ts
+var RunnerHttpError = class extends Error {
+  constructor(statusCode, code, message) {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+    this.name = "RunnerHttpError";
+  }
+  statusCode;
+  code;
+};
+function isTimeoutError(error) {
+  return error instanceof Error && /timeout|timed out|Timeout/i.test(error.message);
+}
+
+// src/runner-service/auth.ts
+function requireRunnerAuth(request, token) {
+  if (!token) {
+    return;
+  }
+  const authorization = request.headers.authorization;
+  if (authorization !== `Bearer ${token}`) {
+    throw new RunnerHttpError(401, "unauthorized", "Missing or invalid runner token.");
+  }
+}
+
+// src/runner-core/limits.ts
+var DEFAULT_MAX_TEXT_LENGTH = 4e3;
+var DEFAULT_MAX_ELEMENTS = 50;
+var DEFAULT_MAX_CONSOLE_ERRORS = 20;
+var DEFAULT_MAX_NETWORK_ERRORS = 20;
+var DEFAULT_REQUEST_BODY_LIMIT_BYTES = 1024 * 1024;
+function toOptionalNumber(value) {
+  if (value === null || value === void 0 || value === "") {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function positiveInt(value, fallback) {
+  const parsed = toOptionalNumber(value);
+  return parsed !== null && Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// src/runner-service/body.ts
+async function readJsonBody(request, limitBytes = DEFAULT_REQUEST_BODY_LIMIT_BYTES) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.byteLength;
+    if (total > limitBytes) {
+      throw new RunnerHttpError(400, "request_too_large", "Request body is too large.");
+    }
+    chunks.push(buffer);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new RunnerHttpError(400, "invalid_json", "Request body must be valid JSON.");
+  }
+}
+
+// src/runner-core/redaction.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_MARKERS = /(token|secret|password|passwd|api[_-]?key|session|cookie|authorization|localStorage|sessionStorage)/i;
+function redactSensitiveText(value, explicitSecrets = []) {
+  let redacted = value;
+  for (const secret of explicitSecrets) {
+    if (secret) {
+      redacted = redacted.split(secret).join(REDACTED);
+    }
+  }
+  return redacted.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED}`).replace(/\b(token|secret|password|passwd|api[_-]?key|session|cookie|authorization)\b\s*[:=]\s*["']?[^"',;\s}]+/gi, `$1=${REDACTED}`).replace(/\b[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED).slice(0, 4e3);
+}
+function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    for (const [key] of url.searchParams) {
+      if (SENSITIVE_MARKERS.test(key)) {
+        url.searchParams.set(key, REDACTED);
+      }
+    }
+    return url.toString();
+  } catch {
+    return redactSensitiveText(value);
+  }
+}
+function safeErrorMessage(error, explicitSecrets = []) {
+  if (error instanceof Error) {
+    return redactSensitiveText(error.message || error.name, explicitSecrets);
+  }
+  return redactSensitiveText(String(error), explicitSecrets);
+}
+
+// src/runner-service/response.ts
+function sendJson(response, statusCode, body) {
+  const json = JSON.stringify(body);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(json)
+  });
+  response.end(json);
+}
+function sendError(response, error, secrets = []) {
+  if (error instanceof RunnerHttpError) {
+    sendJson(response, error.statusCode, {
+      error: {
+        code: error.code,
+        message: safeErrorMessage(error.message, secrets)
+      }
+    });
+    return;
+  }
+  if (isTimeoutError(error)) {
+    sendJson(response, 504, {
+      error: {
+        code: "timeout",
+        message: safeErrorMessage(error, secrets)
+      }
+    });
+    return;
+  }
+  sendJson(response, 500, {
+    error: {
+      code: "runner_failure",
+      message: safeErrorMessage(error, secrets) || "Runner request failed."
+    }
+  });
+}
+
+// src/runner-service/routes.ts
+var CAPABILITIES = [
+  "browser.chromium",
+  "playwright",
+  "browser.session",
+  "draft.validation"
+];
+async function handleRunnerRequest(request, response, context) {
+  try {
+    requireRunnerAuth(request, context.config.token);
+    const url = new URL(request.url ?? "/", "http://runner.local");
+    const pathname = trimTrailingSlash(url.pathname);
+    if (request.method === "GET" && pathname === "/healthz") {
+      sendJson(response, 200, health(context));
+      return;
+    }
+    if (!pathname.startsWith("/v1")) {
+      throw new RunnerHttpError(404, "not_found", "Runner endpoint was not found.");
+    }
+    if (request.method === "POST" && pathname === "/v1/sessions") {
+      const body = await readJsonBody(request);
+      validateCreateSession(body);
+      sendJson(response, 200, await context.sessions.create(body));
+      return;
+    }
+    if (request.method === "POST" && pathname === "/v1/execute-tests") {
+      const body = await readJsonBody(request);
+      validateExecuteTests(body);
+      const executionId = (0, import_node_crypto2.randomUUID)();
+      const artifactDirectory = resolveArtifactDirectory(
+        context.config.artifactDir,
+        executionId,
+        body.artifactDirectory
+      );
+      sendJson(response, 200, await executeRunnerTests(body, { artifactDirectory }));
+      return;
+    }
+    const sessionRoute = matchSessionRoute(pathname);
+    if (!sessionRoute) {
+      throw new RunnerHttpError(404, "not_found", "Runner endpoint was not found.");
+    }
+    if (request.method === "DELETE" && sessionRoute.action === null) {
+      sendJson(response, 200, await context.sessions.end(sessionRoute.sessionId));
+      return;
+    }
+    if (request.method !== "POST" || sessionRoute.action === null) {
+      throw new RunnerHttpError(404, "not_found", "Runner endpoint was not found.");
+    }
+    const session = context.sessions.get(sessionRoute.sessionId);
+    const browserSession = session.browserSession;
+    switch (sessionRoute.action) {
+      case "navigate": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.url, "url");
+        sendJson(response, 200, await browserSession.navigate(body));
+        return;
+      }
+      case "snapshot": {
+        sendJson(
+          response,
+          200,
+          await browserSession.snapshot(await readJsonBody(request))
+        );
+        return;
+      }
+      case "click": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.locator, "locator");
+        sendJson(response, 200, await browserSession.click(body));
+        return;
+      }
+      case "fill": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.locator, "locator");
+        sendJson(response, 200, await browserSession.fill(body));
+        return;
+      }
+      case "press": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.key, "key");
+        sendJson(response, 200, await browserSession.press(body));
+        return;
+      }
+      case "select": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.locator, "locator");
+        sendJson(response, 200, await browserSession.select(body));
+        return;
+      }
+      case "check": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.locator, "locator");
+        sendJson(response, 200, await browserSession.check(body));
+        return;
+      }
+      case "screenshot": {
+        sendJson(
+          response,
+          200,
+          await browserSession.screenshot(await readJsonBody(request))
+        );
+        return;
+      }
+      case "console": {
+        sendJson(response, 200, browserSession.getConsoleEntries());
+        return;
+      }
+      case "network": {
+        sendJson(response, 200, browserSession.getNetworkEntries());
+        return;
+      }
+      case "validate-draft": {
+        const body = await readJsonBody(request);
+        validateRequiredString(body.name, "name");
+        validateRequiredString(body.source, "source");
+        sendJson(response, 200, await browserSession.validateDraft(body));
+        return;
+      }
+    }
+  } catch (error) {
+    sendError(response, error, [context.config.token ?? ""]);
+  }
+}
+function health(context) {
+  const activeSessions = context.sessions.activeSessions;
+  return {
+    status: activeSessions < context.config.maxSessions ? "ok" : "degraded",
+    runnerInstanceId: context.config.runnerInstanceId,
+    version: context.config.version,
+    capabilities: CAPABILITIES,
+    activeSessions,
+    maxSessions: context.config.maxSessions
+  };
+}
+function matchSessionRoute(pathname) {
+  const match = pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/([^/]+))?$/);
+  if (!match) {
+    return null;
+  }
+  const action = match[2] ?? null;
+  if (action !== null && ![
+    "navigate",
+    "snapshot",
+    "click",
+    "fill",
+    "press",
+    "select",
+    "check",
+    "screenshot",
+    "console",
+    "network",
+    "validate-draft"
+  ].includes(action)) {
+    return null;
+  }
+  return {
+    sessionId: decodeURIComponent(match[1] ?? ""),
+    action
+  };
+}
+function validateCreateSession(request) {
+  if (request.baseUrl !== null && request.baseUrl !== void 0) {
+    validateRequiredString(request.baseUrl, "baseUrl");
+  }
+}
+function validateExecuteTests(request) {
+  if (!Array.isArray(request.tests)) {
+    throw new RunnerHttpError(400, "invalid_request", "tests must be an array.");
+  }
+  for (const test of request.tests) {
+    validateRequiredString(test.testId, "testId");
+    validateRequiredString(test.name, "name");
+    validateRequiredString(test.runnerKind, "runnerKind");
+    validateRequiredString(test.source, "source");
+  }
+}
+function validateRequiredString(value, field) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new RunnerHttpError(400, "invalid_request", `${field} is required.`);
+  }
+}
+function trimTrailingSlash(value) {
+  return value.length > 1 ? value.replace(/\/$/, "") : value;
+}
+
+// src/runner-service/session-store.ts
+var import_node_crypto3 = require("crypto");
+
+// src/runner-core/browser-session.ts
+var import_playwright = require("playwright");
+init_playwright_install();
+
+// src/runner-core/browser-tools.ts
+function resolveLocator(page, locator) {
+  const trimmed = locator.trim();
+  const role = trimmed.match(/^getByRole\((['"])([^'"]+)\1,\s*\{\s*name:\s*(['"])(.*?)\3\s*\}\)$/);
+  if (role) {
+    return page.getByRole(role[2], { name: unescapeLocatorText(role[4] ?? "") });
+  }
+  const label = trimmed.match(/^getByLabel\((['"])(.*?)\1\)$/);
+  if (label) {
+    return page.getByLabel(unescapeLocatorText(label[2] ?? ""));
+  }
+  const placeholder = trimmed.match(/^getByPlaceholder\((['"])(.*?)\1\)$/);
+  if (placeholder) {
+    return page.getByPlaceholder(unescapeLocatorText(placeholder[2] ?? ""));
+  }
+  const locatorCall2 = trimmed.match(/^locator\((['"])(.*?)\1\)$/);
+  if (locatorCall2) {
+    return page.locator(unescapeLocatorText(locatorCall2[2] ?? ""));
+  }
+  return page.locator(trimmed);
+}
+function unescapeLocatorText(value) {
+  try {
+    return JSON.parse(`"${value.replace(/"/g, '\\"')}"`);
+  } catch {
+    return value;
+  }
+}
+
+// src/runner-core/browser-snapshot.ts
+async function buildBrowserSnapshot(page, request, options) {
+  const maxTextLength = positiveInt(request.maxTextLength, DEFAULT_MAX_TEXT_LENGTH);
+  const maxElements = positiveInt(request.maxElements, DEFAULT_MAX_ELEMENTS);
+  const raw = await page.evaluate(extractSnapshot, { maxElements });
+  const visibleTextPreview = raw.visibleText.length > maxTextLength ? raw.visibleText.slice(0, maxTextLength) : raw.visibleText;
+  const screenshot = request.includeScreenshot ? await captureSnapshotScreenshot(page, options.artifactDirectory) : null;
+  return {
+    url: page.url(),
+    title: raw.title || null,
+    visibleTextPreview,
+    headings: raw.headings,
+    buttons: raw.buttons,
+    links: raw.links,
+    inputs: raw.inputs,
+    forms: raw.forms,
+    candidateLocators: raw.candidateLocators,
+    consoleErrors: options.consoleErrors.slice(-DEFAULT_MAX_CONSOLE_ERRORS),
+    networkErrors: options.networkErrors.slice(-DEFAULT_MAX_NETWORK_ERRORS),
+    screenshot,
+    truncated: raw.visibleText.length > maxTextLength || raw.headings.length >= maxElements || raw.buttons.length >= maxElements || raw.links.length >= maxElements || raw.inputs.length >= maxElements
+  };
+}
+async function captureSnapshotScreenshot(page, artifactDirectory) {
+  try {
+    const data = await page.screenshot({ fullPage: false, animations: "disabled" });
+    return await writeArtifact(
+      artifactDirectory,
+      "screenshot",
+      `snapshot-${Date.now()}.png`,
+      "image/png",
+      data
+    );
+  } catch {
+    return null;
+  }
+}
+function extractSnapshot(args) {
+  const locatorCall2 = (kind, value, role) => {
+    if (kind === "getByRole") {
+      return `getByRole(${JSON.stringify(role ?? "button")}, { name: ${JSON.stringify(value)} })`;
+    }
+    if (kind === "getByLabel") {
+      return `getByLabel(${JSON.stringify(value)})`;
+    }
+    if (kind === "getByPlaceholder") {
+      return `getByPlaceholder(${JSON.stringify(value)})`;
+    }
+    return `locator(${JSON.stringify(value)})`;
+  };
+  const sensitive = (value) => Boolean(value && /(token|secret|password|passwd|api[_-]?key|session|cookie|authorization|localStorage|sessionStorage)/i.test(value));
+  const isSensitiveField2 = (input) => [
+    input.type,
+    input.name,
+    input.label,
+    input.placeholder,
+    input.selector
+  ].some(sensitive);
+  const cleanText = (value) => (value ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+  const attr = (element, name) => {
+    const value = element.getAttribute(name)?.trim();
+    return value || null;
+  };
+  const cssEscape = (value) => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const isVisible = (element) => {
+    const html = element;
+    const style = window.getComputedStyle(html);
+    const rect = html.getBoundingClientRect();
+    return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+  };
+  const visibleElements = (selector) => Array.from(document.querySelectorAll(selector)).filter(isVisible);
+  const findLabel = (element) => {
+    const aria = attr(element, "aria-label");
+    if (aria) {
+      return aria;
+    }
+    const id = attr(element, "id");
+    if (id) {
+      const label = document.querySelector(`label[for="${cssEscape(id)}"]`);
+      const text = cleanText(label?.textContent);
+      if (text) {
+        return text;
+      }
+    }
+    const wrapped = element.closest("label");
+    return cleanText(wrapped?.textContent) || null;
+  };
+  const stableSelector = (element) => {
+    const testId = attr(element, "data-testid") ?? attr(element, "data-test");
+    if (testId) {
+      return `[data-testid="${cssEscape(testId)}"]`;
+    }
+    const id = attr(element, "id");
+    if (id && /^[A-Za-z][A-Za-z0-9_-]{1,80}$/.test(id)) {
+      return `#${cssEscape(id)}`;
+    }
+    const name = attr(element, "name");
+    if (name) {
+      return `${element.tagName.toLowerCase()}[name="${cssEscape(name)}"]`;
+    }
+    return null;
+  };
+  const interactiveElement = (element, role, candidates) => {
+    const text = cleanText(
+      element.textContent || attr(element, "value") || attr(element, "aria-label") || attr(element, "title") || ""
+    ) || null;
+    const selector = stableSelector(element);
+    const candidateLocator = text ? locatorCall2("getByRole", text, role) : selector ? locatorCall2("locator", selector) : null;
+    if (candidateLocator) {
+      candidates.push({
+        kind: text ? "role" : "selector",
+        value: candidateLocator,
+        confidence: text ? "high" : "medium"
+      });
+    }
+    return {
+      text,
+      role,
+      selector,
+      candidateLocator,
+      disabled: element.disabled === true
+    };
+  };
+  const inputElement = (element, candidates) => {
+    const type = attr(element, "type") ?? element.tagName.toLowerCase();
+    const name = attr(element, "name");
+    const placeholder = attr(element, "placeholder");
+    const label = findLabel(element);
+    const selector = stableSelector(element);
+    const candidateLocator = label ? locatorCall2("getByLabel", label) : placeholder ? locatorCall2("getByPlaceholder", placeholder) : name ? locatorCall2("locator", `${element.tagName.toLowerCase()}[name="${cssEscape(name)}"]`) : selector ? locatorCall2("locator", selector) : null;
+    if (candidateLocator) {
+      candidates.push({
+        kind: label ? "label" : placeholder ? "placeholder" : "selector",
+        value: candidateLocator,
+        confidence: label || placeholder ? "high" : "medium"
+      });
+    }
+    return {
+      label,
+      placeholder,
+      name,
+      type,
+      selector,
+      candidateLocator,
+      valueRedacted: isSensitiveField2({ type, name, label, placeholder, selector })
+    };
+  };
+  const dedupeCandidates = (values) => {
+    const seen = /* @__PURE__ */ new Set();
+    return values.filter((value) => {
+      if (seen.has(value.value)) {
+        return false;
+      }
+      seen.add(value.value);
+      return true;
+    });
+  };
+  const maxElements = args.maxElements;
+  const candidateLocators = [];
+  const headings = visibleElements("h1,h2,h3,h4,h5,h6").slice(0, maxElements).map((element) => {
+    const text = cleanText(element.textContent);
+    const level = Number(element.tagName.slice(1));
+    const candidateLocator = text ? locatorCall2("getByRole", text, "heading") : null;
+    if (candidateLocator) {
+      candidateLocators.push({ kind: "role", value: candidateLocator, confidence: "medium" });
+    }
+    return { text, level, candidateLocator };
+  }).filter((element) => element.text);
+  const buttons = visibleElements("button,[role='button'],input[type='button'],input[type='submit']").slice(0, maxElements).map((element) => interactiveElement(element, "button", candidateLocators));
+  const links = visibleElements("a[href]").slice(0, maxElements).map((element) => interactiveElement(element, "link", candidateLocators));
+  const inputs = visibleElements("input,textarea,select").slice(0, maxElements).map((element) => inputElement(element, candidateLocators));
+  const forms = visibleElements("form").slice(0, Math.min(10, maxElements)).map((form) => {
+    const formInputs = Array.from(form.querySelectorAll("input,textarea,select")).filter(isVisible).slice(0, maxElements).map((element) => inputElement(element, candidateLocators));
+    const submitButtons = Array.from(form.querySelectorAll("button,input[type='submit']")).filter(isVisible).slice(0, maxElements).map((element) => interactiveElement(element, "button", candidateLocators));
+    return {
+      name: attr(form, "name"),
+      action: attr(form, "action"),
+      method: attr(form, "method"),
+      inputs: formInputs,
+      submitButtons
+    };
+  });
+  return {
+    title: document.title,
+    visibleText: cleanText(document.body?.innerText ?? ""),
+    headings,
+    buttons,
+    links,
+    inputs,
+    forms,
+    candidateLocators: dedupeCandidates(candidateLocators).slice(0, maxElements)
+  };
+}
+
+// src/runner-core/browser-session.ts
+var MAX_RING_ENTRIES = 100;
+var BrowserSession = class _BrowserSession {
+  constructor(options) {
+    this.options = options;
+  }
+  options;
+  browser = null;
+  context = null;
+  page = null;
+  consoleEntries = [];
+  networkEntries = [];
+  static async create(options) {
+    await ensurePlaywrightBrowserInstalled();
+    const session = new _BrowserSession(options);
+    session.browser = await import_playwright.chromium.launch({ headless: options.headless });
+    session.context = await session.browser.newContext({
+      baseURL: options.baseUrl ?? void 0
+    });
+    session.page = await session.context.newPage();
+    session.attachPageEvents(session.page);
+    return session;
+  }
+  async navigate(request) {
+    const page = this.requirePage();
+    await page.goto(request.url, {
+      waitUntil: normalizeWaitUntil(request.waitUntil),
+      timeout: timeout(request.timeoutMs, this.options.timeoutMs)
+    });
+    return {
+      url: page.url(),
+      title: await page.title().catch(() => null),
+      snapshot: await this.snapshot({
+        includeScreenshot: false,
+        maxTextLength: null,
+        maxElements: null
+      })
+    };
+  }
+  async snapshot(request) {
+    return await buildBrowserSnapshot(this.requirePage(), request, {
+      artifactDirectory: this.options.artifactDirectory,
+      consoleErrors: this.getConsoleEntries().filter(
+        (entry) => ["error", "pageerror"].includes(entry.level)
+      ),
+      networkErrors: this.getNetworkEntries()
+    });
+  }
+  async click(request) {
+    await resolveLocator(this.requirePage(), request.locator).click({
+      timeout: timeout(request.timeoutMs, this.options.timeoutMs)
+    });
+    return this.snapshot(defaultSnapshotRequest());
+  }
+  async fill(request) {
+    await resolveLocator(this.requirePage(), request.locator).fill(request.value, {
+      timeout: timeout(request.timeoutMs, this.options.timeoutMs)
+    });
+    return this.snapshot(defaultSnapshotRequest());
+  }
+  async press(request) {
+    const page = this.requirePage();
+    if (request.locator) {
+      await resolveLocator(page, request.locator).press(request.key, {
+        timeout: timeout(request.timeoutMs, this.options.timeoutMs)
+      });
+    } else {
+      await page.keyboard.press(request.key);
+    }
+    return this.snapshot(defaultSnapshotRequest());
+  }
+  async select(request) {
+    await resolveLocator(this.requirePage(), request.locator).selectOption(request.value, {
+      timeout: timeout(request.timeoutMs, this.options.timeoutMs)
+    });
+    return this.snapshot(defaultSnapshotRequest());
+  }
+  async check(request) {
+    const locator = resolveLocator(this.requirePage(), request.locator);
+    if (request.checked) {
+      await locator.check({ timeout: timeout(request.timeoutMs, this.options.timeoutMs) });
+    } else {
+      await locator.uncheck({ timeout: timeout(request.timeoutMs, this.options.timeoutMs) });
+    }
+    return this.snapshot(defaultSnapshotRequest());
+  }
+  async screenshot(request) {
+    const data = await this.requirePage().screenshot({
+      fullPage: request.fullPage,
+      animations: "disabled"
+    });
+    return await writeArtifact(
+      this.options.artifactDirectory,
+      "screenshot",
+      request.fileName ?? `screenshot-${Date.now()}.png`,
+      "image/png",
+      data
+    );
+  }
+  getConsoleEntries() {
+    return [...this.consoleEntries];
+  }
+  getNetworkEntries() {
+    return [...this.networkEntries];
+  }
+  async validateDraft(request) {
+    return await validateDraftPlaywrightTest(request, {
+      artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory
+    });
+  }
+  async close() {
+    await this.context?.close().catch(() => {
+    });
+    await this.browser?.close().catch(() => {
+    });
+    this.context = null;
+    this.browser = null;
+    this.page = null;
+  }
+  requirePage() {
+    if (!this.page) {
+      throw new Error("Browser session is closed.");
+    }
+    return this.page;
+  }
+  attachPageEvents(page) {
+    page.on("console", (message) => {
+      pushRing(this.consoleEntries, {
+        level: message.type(),
+        message: redactSensitiveText(message.text()),
+        timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+    page.on("pageerror", (error) => {
+      pushRing(this.consoleEntries, {
+        level: "pageerror",
+        message: safeErrorMessage(error),
+        timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+    page.on("requestfailed", (request) => {
+      pushRing(this.networkEntries, {
+        url: redactUrl(request.url()),
+        method: request.method(),
+        status: null,
+        failureText: redactSensitiveText(request.failure()?.errorText ?? "request failed"),
+        timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+    page.on("response", (response) => {
+      if (response.status() < 400) {
+        return;
+      }
+      pushRing(this.networkEntries, {
+        url: redactUrl(response.url()),
+        method: response.request().method(),
+        status: response.status(),
+        failureText: null,
+        timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+  }
+};
+function pushRing(entries, entry) {
+  entries.push(entry);
+  if (entries.length > MAX_RING_ENTRIES) {
+    entries.splice(0, entries.length - MAX_RING_ENTRIES);
+  }
+}
+function timeout(value, fallback) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+function normalizeWaitUntil(value) {
+  if (value === "load" || value === "networkidle" || value === "commit") {
+    return value;
+  }
+  return "domcontentloaded";
+}
+function defaultSnapshotRequest() {
+  return {
+    includeScreenshot: false,
+    maxTextLength: null,
+    maxElements: null
+  };
+}
+
+// src/runner-service/session-store.ts
+var SessionStore = class {
+  constructor(config) {
+    this.config = config;
+  }
+  config;
+  sessions = /* @__PURE__ */ new Map();
+  get activeSessions() {
+    this.cleanupExpired().catch(() => {
+    });
+    return this.sessions.size;
+  }
+  async create(request) {
+    await this.cleanupExpired();
+    if (this.sessions.size >= this.config.maxSessions) {
+      throw new RunnerHttpError(
+        429,
+        "max_sessions_exceeded",
+        "Runner has no available session capacity."
+      );
+    }
+    const sessionId = (0, import_node_crypto3.randomUUID)();
+    const createdAtUtc = (/* @__PURE__ */ new Date()).toISOString();
+    const expiresAtUtc = new Date(Date.now() + this.config.sessionTimeoutMs).toISOString();
+    const artifactDirectory = resolveArtifactDirectory(
+      this.config.artifactDir,
+      sessionId,
+      request.artifactDirectory
+    );
+    const browserSession = await BrowserSession.create({
+      sessionId,
+      baseUrl: request.baseUrl,
+      artifactDirectory,
+      headless: request.headless ?? this.config.headless,
+      timeoutMs: toNumber2(request.timeoutMs) ?? this.config.sessionTimeoutMs
+    });
+    this.sessions.set(sessionId, {
+      sessionId,
+      runnerInstanceId: this.config.runnerInstanceId,
+      createdAtUtc,
+      expiresAtUtc,
+      baseUrl: request.baseUrl,
+      artifactDirectory,
+      metadata: request.metadata,
+      browserSession
+    });
+    return {
+      sessionId,
+      runnerInstanceId: this.config.runnerInstanceId,
+      startedAtUtc: createdAtUtc,
+      expiresAtUtc,
+      browserName: "chromium",
+      runnerVersion: this.config.version
+    };
+  }
+  get(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new RunnerHttpError(404, "session_not_found", "Runner session was not found.");
+    }
+    if (Date.parse(session.expiresAtUtc) <= Date.now()) {
+      void this.end(sessionId);
+      throw new RunnerHttpError(404, "session_expired", "Runner session has expired.");
+    }
+    return session;
+  }
+  async end(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      this.sessions.delete(sessionId);
+      await session.browserSession.close();
+    }
+    return {
+      sessionId,
+      endedAtUtc: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  async closeAll() {
+    await Promise.all([...this.sessions.keys()].map((sessionId) => this.end(sessionId)));
+  }
+  async cleanupExpired() {
+    const now = Date.now();
+    for (const [sessionId, session] of this.sessions) {
+      if (Date.parse(session.expiresAtUtc) <= now) {
+        await this.end(sessionId);
+      }
+    }
+  }
+};
+function toNumber2(value) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+// src/runner-service/server.ts
+async function startRunnerService(config) {
+  const sessions = new SessionStore(config);
+  const server = (0, import_node_http.createServer)((request, response) => {
+    void handleRunnerRequest(request, response, { config, sessions }).catch((error) => {
+      console.error(`runner-service request failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  });
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(config.port, config.host, () => {
+      server.off("error", reject);
+      resolve2();
+    });
+  });
+  return {
+    server,
+    sessions,
+    async stop() {
+      await new Promise((resolve2) => {
+        server.close(() => resolve2());
+      });
+      await sessions.closeAll();
+    }
+  };
+}
+
+// src/commands/runner-service.ts
+async function runRunnerServiceCommand(options, version) {
+  const config = resolveRunnerServiceConfig(options, version);
+  const handle = await startRunnerService(config);
+  console.error(
+    `TestMutant runner service listening on ${config.host}:${config.port} (${config.runnerInstanceId})`
+  );
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    console.error("TestMutant runner service shutting down.");
+    await handle.stop();
+  };
+  process.once("SIGINT", () => {
+    void stop().then(() => process.exit(0));
+  });
+  process.once("SIGTERM", () => {
+    void stop().then(() => process.exit(0));
+  });
+  await new Promise(() => {
+  });
+}
 
 // src/api-client.ts
 init_config();
@@ -1018,7 +2692,7 @@ var TestMutantApiClient = class {
       "screenshot.png"
     );
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const timeout2 = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       const response = await fetch(new URL(path, this.options.apiUrl), {
         method: "POST",
@@ -1034,7 +2708,7 @@ var TestMutantApiClient = class {
       }
     } catch {
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeout2);
     }
   }
   async postJson(path, body, expectedStatus = 200) {
@@ -1056,7 +2730,7 @@ var TestMutantApiClient = class {
   }
   async request(path, body) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const timeout2 = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       return await fetch(new URL(path, this.options.apiUrl), {
         method: "POST",
@@ -1078,7 +2752,7 @@ var TestMutantApiClient = class {
       const message = error instanceof Error ? error.message : String(error);
       throw new CliError(`Could not reach TestMutant API. ${message}`);
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeout2);
     }
   }
 };
@@ -1097,13 +2771,13 @@ async function readErrorDetail(response) {
         formatValidationErrors(problem.errors)
       ].filter((part) => Boolean(part));
       if (parts.length > 0) {
-        return ` ${truncate(parts.join(" "), 500)}`;
+        return ` ${truncate2(parts.join(" "), 500)}`;
       }
     } catch {
-      return ` ${truncate(body, 500)}`;
+      return ` ${truncate2(body, 500)}`;
     }
   }
-  return ` ${truncate(body, 500)}`;
+  return ` ${truncate2(body, 500)}`;
 }
 function formatValidationErrors(errors) {
   if (!errors || typeof errors !== "object") {
@@ -1121,7 +2795,7 @@ function formatValidationErrors(errors) {
   }
   return messages.length > 0 ? messages.join(" ") : null;
 }
-function truncate(value, maxLength) {
+function truncate2(value, maxLength) {
   if (value.length <= maxLength) {
     return value;
   }
@@ -1158,7 +2832,7 @@ var HostedRunnerApiClient = class {
   }
   async postJson(path, body, expectedStatus = 200) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const timeout2 = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       const response = await fetch(new URL(path, this.options.apiUrl), {
         method: "POST",
@@ -1196,7 +2870,7 @@ var HostedRunnerApiClient = class {
       const message = error instanceof Error ? error.message : String(error);
       throw new CliError(`Could not reach hosted runner API. ${message}`);
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeout2);
     }
   }
 };
@@ -1205,7 +2879,7 @@ function enc(value) {
 }
 
 // src/ci-metadata.ts
-var import_node_child_process = require("child_process");
+var import_node_child_process3 = require("child_process");
 var import_node_fs = require("fs");
 init_config();
 function buildCreateRunRequest(options = {}) {
@@ -1403,7 +3077,7 @@ function git(args) {
   try {
     const safeDirectory = process.cwd().replace(/\\/g, "/");
     return normalize(
-      (0, import_node_child_process.execFileSync)("git", ["-c", `safe.directory=${safeDirectory}`, ...args], {
+      (0, import_node_child_process3.execFileSync)("git", ["-c", `safe.directory=${safeDirectory}`, ...args], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"]
       })
@@ -1413,7 +3087,7 @@ function git(args) {
   }
 }
 
-// src/run-ci.ts
+// src/cli/run-ci.ts
 init_config();
 init_playwright_runner();
 async function runCi(options) {
@@ -1644,7 +3318,7 @@ async function runHostedRunner(config, options = {}) {
       result = await agentGenerator({
         apiUrl: config.apiUrl,
         apiKey: config.sessionToken,
-        timeoutMs: config.limits.runTimeoutSeconds * 1e3,
+        timeoutMs: hostedAgentTimeoutMs(config),
         userAgent: "testmutant-hosted-runner",
         runId: config.runId,
         baseUrl,
@@ -1784,6 +3458,9 @@ async function runHostedRunner(config, options = {}) {
 function isGenerationRun(runKind) {
   return runKind === RunKind.Generation || String(runKind).toLowerCase() === "generation";
 }
+function hostedAgentTimeoutMs(config) {
+  return Math.max(3e4, Math.max(1, Number(config.limits.runTimeoutSeconds)) * 1e3);
+}
 function createHeartbeatMonitor(config, reporter, intervalMs) {
   const controller = new AbortController();
   let stopped = false;
@@ -1906,13 +3583,13 @@ function wait(ms, signal) {
   if (signal.aborted) {
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    const timeout = setTimeout(resolve, ms);
+  return new Promise((resolve2) => {
+    const timeout2 = setTimeout(resolve2, ms);
     signal.addEventListener(
       "abort",
       () => {
-        clearTimeout(timeout);
-        resolve();
+        clearTimeout(timeout2);
+        resolve2();
       },
       { once: true }
     );
@@ -2184,7 +3861,7 @@ function createDefaultResultReporter(config) {
 }
 
 // src/environment-check.ts
-var import_playwright2 = require("playwright");
+var import_playwright3 = require("playwright");
 init_playwright_install();
 var EnvironmentCheckStatus = {
   Ready: 3,
@@ -2211,7 +3888,7 @@ async function executeEnvironmentCheck(context, options = {}) {
       statusReason: result.statusReason ? redactSecrets(result.statusReason, context) : null
     };
   } catch (error) {
-    const isTimeout = isTimeoutError(error);
+    const isTimeout = isTimeoutError2(error);
     return {
       status: isTimeout ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
       statusReason: redactSecrets(extractErrorMessage(error), context),
@@ -2266,7 +3943,7 @@ function validateConfiguration(context) {
 async function playwrightBrowserDriver(context) {
   await ensurePlaywrightBrowserInstalled();
   const startMs = Date.now();
-  const browser = await import_playwright2.chromium.launch({ headless: true });
+  const browser = await import_playwright3.chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
     const remaining1 = remainingMs(startMs, context.timeoutMs);
@@ -2287,7 +3964,7 @@ async function playwrightBrowserDriver(context) {
       }
     } catch (error) {
       return {
-        status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
+        status: isTimeoutError2(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
         statusReason: extractErrorMessage(error),
         screenshotBuffer: await takeScreenshot(page)
       };
@@ -2318,7 +3995,7 @@ async function playwrightBrowserDriver(context) {
         }
       } catch (error) {
         return {
-          status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
+          status: isTimeoutError2(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
           statusReason: extractErrorMessage(error),
           screenshotBuffer: await takeScreenshot(page)
         };
@@ -2381,7 +4058,7 @@ async function performCredentialLogin(page, context, startMs) {
     }
   } catch (error) {
     return {
-      status: isTimeoutError(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
+      status: isTimeoutError2(error) ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.LoginFailed,
       statusReason: extractErrorMessage(error),
       screenshotBuffer: await takeScreenshot(page)
     };
@@ -2467,7 +4144,7 @@ function buildSuccessReason(context) {
   }
   return "Base URL is reachable.";
 }
-function isTimeoutError(error) {
+function isTimeoutError2(error) {
   if (error instanceof Error) {
     if (error.name === "TimeoutError") {
       return true;
@@ -2720,12 +4397,15 @@ program.name("testmutant").description("Run TestMutant workflows locally or in C
   "-u, --api-url <url>",
   `TestMutant API base URL. Defaults to ${API_URL_ENV_VAR} or ${DEFAULT_API_URL}.`
 ).option("--timeout <ms>", "API request timeout in milliseconds.", "30000").option("--json", "Print command output as JSON.");
-program.hook("preAction", async () => {
+program.hook("preAction", async (_thisCommand, actionCommand) => {
   const options = program.opts();
-  if (options.json) {
+  if (options.json || actionCommand.name() === "runner-service") {
     return;
   }
   await printUpdateReminder(packageInfo);
+});
+program.command("runner-service").description("Start the internal HTTP Playwright runner service.").option("--host <host>", "Host to bind. Defaults to TESTMUTANT_RUNNER_HOST or 0.0.0.0.").option("--port <port>", "Port to bind. Defaults to TESTMUTANT_RUNNER_PORT or 8080.").option("--token <token>", "Internal bearer token. Defaults to TESTMUTANT_RUNNER_TOKEN.").option("--runner-instance-id <id>", "Runner instance id.").option("--artifact-dir <path>", "Artifact root directory.").option("--max-sessions <number>", "Maximum concurrent browser sessions.").option("--session-timeout-ms <number>", "Session timeout in milliseconds.").option("--headless <true|false>", "Run Chromium headless.").action(async (commandOptions) => {
+  await runRunnerServiceCommand(commandOptions, packageInfo.version);
 });
 program.command("ping").description("Verify the CLI can authenticate with the TestMutant API.").action(async () => {
   const options = program.opts();
@@ -2861,7 +4541,7 @@ program.parseAsync(process.argv).catch((error) => {
   process.exitCode = 1;
 });
 function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path3.join)(__dirname, "..", "package.json");
+  const packageJsonPath = (0, import_node_path6.join)(__dirname, "..", "package.json");
   const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
   return {
     name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
@@ -2880,7 +4560,7 @@ async function printUpdateReminder(packageInfo2) {
 }
 async function fetchLatestPackageVersion(packageName) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1e3);
+  const timeout2 = setTimeout(() => controller.abort(), 1e3);
   try {
     const response = await fetch(
       `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
@@ -2897,7 +4577,7 @@ async function fetchLatestPackageVersion(packageName) {
   } catch {
     return null;
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timeout2);
   }
 }
 function isNewerVersion(candidate, current) {

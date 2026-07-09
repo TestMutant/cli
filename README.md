@@ -1,6 +1,13 @@
-# TestMutant CLI
+# TestMutant Runner Package
 
-Command-line tools for using TestMutant locally and in CI.
+Command-line tools and runner runtimes for TestMutant.
+
+The package has two first-class runtime adapters:
+
+- Public CLI and GitHub Action flows for API-driven CI runs.
+- Internal HTTP Playwright runner service for API-owned orchestration.
+
+Both paths reuse the same Playwright execution engine under `runner-core`.
 
 ## Requirements
 
@@ -121,6 +128,19 @@ testmutant ci --mode Enforce https://preview.example.com
 Generated Playwright tests run with the CLI-managed Playwright runtime. In
 `Enforce` mode, failed generated tests are reported to the API before the CLI
 exits with a nonzero status.
+
+### `testmutant runner-service`
+
+Starts the internal HTTP Playwright runner service. This is for TestMutant API
+orchestration and is not a public customer CI entrypoint.
+
+```sh
+npm run build
+node dist/index.js runner-service --port 8080 --token dev-runner-token
+```
+
+See [`docs/runner-service.md`](docs/runner-service.md) for endpoint, auth, and
+configuration details.
 
 ## Hosted Runner Invocation
 
