@@ -25,6 +25,7 @@ import type {
   SelectRequest,
   ValidateDraftPlaywrightTestRequest,
   ValidateDraftPlaywrightTestResponse,
+  InternalRunnerEnvironmentPayload,
 } from "./runner-contracts";
 import { validateDraftPlaywrightTest } from "./playwright-runner-adapter";
 
@@ -33,6 +34,7 @@ const MAX_RING_ENTRIES = 100;
 export type BrowserSessionOptions = {
   sessionId: string;
   baseUrl: string | null;
+  environment?: InternalRunnerEnvironmentPayload | null;
   artifactDirectory: string;
   headless: boolean;
   timeoutMs: number;
