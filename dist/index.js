@@ -155,10 +155,7 @@ async function runPlaywrightTests(tests, options = {}) {
       options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    const runtimeEnv = {
-      ...process.env,
-      NODE_PATH: buildNodePath(process.env.NODE_PATH)
-    };
+    const runtimeEnv = buildSterileRuntimeEnvironment();
     await ensureBrowserInstalledForRun(commandRunner, workDir, runtimeEnv, options.signal);
     const result = await commandRunner(
       process.execPath,
@@ -201,6 +198,7 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
+      options.storageStatePath ? `    storageState: ${JSON.stringify(options.storageStatePath)},` : "",
       "    screenshot: 'only-on-failure',",
       `    trace: '${traceMode}',`,
       `    video: '${videoMode}',`,
@@ -214,7 +212,7 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
   if (captureStepEvidence) {
     await (0, import_promises2.writeFile)(
       (0, import_node_path4.join)(workDir, STEP_RECORDER_FILE_NAME),
-      TESTMUTANT_STEP_RECORDER_SOURCE,
+      createStepRecorderSource(baseUrl),
       "utf8"
     );
   }
@@ -529,6 +527,19 @@ function instrumentPlaywrightTestSource(source) {
     `require("./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}")`
   );
 }
+function createStepRecorderSource(baseUrl) {
+  const allowedOrigins = baseUrl ? (() => {
+    try {
+      return [new URL(baseUrl).origin];
+    } catch {
+      return [];
+    }
+  })() : [];
+  return TESTMUTANT_STEP_RECORDER_SOURCE.replace(
+    "__TESTMUTANT_ALLOWED_ORIGINS__",
+    JSON.stringify(allowedOrigins)
+  );
+}
 function coerceNullableNumber(value) {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -676,6 +687,27 @@ function buildNodePath(existing) {
     (0, import_node_path4.dirname)((0, import_node_path4.dirname)(runtimeRequire.resolve("@playwright/test")))
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
+}
+function buildSterileRuntimeEnvironment() {
+  const values = {
+    NODE_PATH: buildNodePath(process.env.NODE_PATH)
+  };
+  for (const name of [
+    "PATH",
+    "Path",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "PLAYWRIGHT_BROWSERS_PATH"
+  ]) {
+    const value = process.env[name];
+    if (value) {
+      values[name] = value;
+    }
+  }
+  return values;
 }
 function getPlaywrightInstallArgs() {
   if (process.platform === "linux") {
@@ -885,6 +917,7 @@ const SENSITIVE_SCREENSHOT_SELECTOR = [
   "textarea[name*='secret' i]",
   "textarea[name*='token' i]"
 ].join(", ");
+const ALLOWED_ORIGINS = __TESTMUTANT_ALLOWED_ORIGINS__;
 
 const storage = new AsyncLocalStorage<EvidenceContext>();
 
@@ -903,6 +936,16 @@ const test = base.extend<{ _testmutantEvidence: void }>({
       networkCapped: false
     };
 
+    await page.route("**/*", async (route) => {
+      try {
+        if (ALLOWED_ORIGINS.includes(new URL(route.request().url()).origin)) {
+          await route.continue();
+          return;
+        }
+      } catch {
+      }
+      await route.abort("blockedbyclient");
+    });
     attachPageEvents(page, context);
     await storage.run(context, async () => {
       try {
@@ -1535,7 +1578,7 @@ var init_agent_runner = __esm({
 // src/index.ts
 var import_config8 = require("dotenv/config");
 var import_node_fs2 = require("fs");
-var import_node_path6 = require("path");
+var import_node_path7 = require("path");
 
 // src/runner-service/config.ts
 var import_node_crypto = require("crypto");
@@ -1653,11 +1696,86 @@ function isSubpath(parent, child) {
 // src/runner-core/playwright-runner-adapter.ts
 var import_node_path5 = require("path");
 init_playwright_execution();
+
+// src/runner-core/generated-source-policy.ts
+var import_typescript = __toESM(require("typescript"));
+var ALLOWED_IMPORT = "@playwright/test";
+var FORBIDDEN_IDENTIFIERS = /* @__PURE__ */ new Set([
+  "process",
+  "require",
+  "eval",
+  "Function",
+  "fetch",
+  "WebSocket",
+  "Bun",
+  "Deno"
+]);
+function validateGeneratedPlaywrightSource(source, explicitSecrets = []) {
+  if (!source.trim()) {
+    return { valid: false, error: "Generated Playwright source is required." };
+  }
+  for (const secret of explicitSecrets) {
+    if (secret && source.includes(secret)) {
+      return { valid: false, error: "Generated source contains a protected credential value." };
+    }
+  }
+  const file = import_typescript.default.createSourceFile(
+    "generated.spec.ts",
+    source,
+    import_typescript.default.ScriptTarget.ES2022,
+    true,
+    import_typescript.default.ScriptKind.TS
+  );
+  const parseDiagnostics = file.parseDiagnostics ?? [];
+  if (parseDiagnostics.length > 0) {
+    return { valid: false, error: "Generated Playwright source has TypeScript syntax errors." };
+  }
+  let importCount = 0;
+  let error = null;
+  const reject = (message) => {
+    error ??= message;
+  };
+  const visit = (node) => {
+    if (import_typescript.default.isImportDeclaration(node)) {
+      importCount += 1;
+      if (!import_typescript.default.isStringLiteral(node.moduleSpecifier) || node.moduleSpecifier.text !== ALLOWED_IMPORT) {
+        reject(`Only '${ALLOWED_IMPORT}' may be imported by generated tests.`);
+      }
+    }
+    if (import_typescript.default.isImportEqualsDeclaration(node)) {
+      reject("Generated tests may not use import-equals declarations.");
+    }
+    if (import_typescript.default.isCallExpression(node) && node.expression.kind === import_typescript.default.SyntaxKind.ImportKeyword) {
+      reject("Generated tests may not use dynamic imports.");
+    }
+    if (import_typescript.default.isIdentifier(node) && FORBIDDEN_IDENTIFIERS.has(node.text)) {
+      reject(`Generated tests may not use '${node.text}'.`);
+    }
+    if (import_typescript.default.isPropertyAccessExpression(node) && import_typescript.default.isIdentifier(node.expression) && node.expression.text === "page" && (node.name.text === "context" || node.name.text === "request")) {
+      reject("Generated tests may not access browser context, cookies, or request clients.");
+    }
+    import_typescript.default.forEachChild(node, visit);
+  };
+  visit(file);
+  if (error) {
+    return { valid: false, error };
+  }
+  if (importCount !== 1 || !/\btest\s*\(/.test(source)) {
+    return {
+      valid: false,
+      error: "Generated source must import '@playwright/test' and define a Playwright test."
+    };
+  }
+  return { valid: true };
+}
+
+// src/runner-core/playwright-runner-adapter.ts
 async function executeRunnerTests(request, options) {
   const summary = await runPlaywrightTests(
     request.tests.map(toCoreTestDefinition),
     {
       baseUrl: request.baseUrl,
+      storageStatePath: options.storageStatePath,
       perTestTimeoutMs: toNumber(request.perTestTimeoutMs) ?? void 0,
       traceMode: "retain-on-failure",
       videoMode: "retain-on-failure",
@@ -1669,6 +1787,25 @@ async function executeRunnerTests(request, options) {
   return toRunnerSummary(summary, request.tests, options.artifactDirectory);
 }
 async function validateDraftPlaywrightTest(request, options) {
+  const policy = validateGeneratedPlaywrightSource(request.source, options.explicitSecrets);
+  if (!policy.valid) {
+    return {
+      passed: false,
+      summary: {
+        kind: "playwright",
+        baseUrl: request.baseUrl,
+        total: 0,
+        passed: 0,
+        failed: 1,
+        skipped: 0,
+        errored: 0,
+        tests: []
+      },
+      failureExcerpt: policy.error,
+      artifacts: [],
+      failureClassification: "test_code"
+    };
+  }
   const test = {
     testId: "generated-draft",
     testSpecId: null,
@@ -1680,6 +1817,7 @@ async function validateDraftPlaywrightTest(request, options) {
   const summary = await executeRunnerTests(
     {
       baseUrl: request.baseUrl,
+      environment: null,
       tests: [test],
       perTestTimeoutMs: request.timeoutMs,
       runTimeoutMs: null,
@@ -1694,8 +1832,22 @@ async function validateDraftPlaywrightTest(request, options) {
     passed: toNumber(summary.failed) === 0 && toNumber(summary.errored) === 0 && (toNumber(summary.total) ?? 0) > 0,
     summary,
     failureExcerpt: failure?.errorMessage ?? null,
-    artifacts: summary.tests.flatMap((candidate) => candidate.artifacts)
+    artifacts: summary.tests.flatMap((candidate) => candidate.artifacts),
+    failureClassification: failure ? classifyFailure(failure.errorMessage) : null
   };
+}
+function classifyFailure(message) {
+  const normalized = (message ?? "").toLowerCase();
+  if (/syntax|cannot find module|strict mode|locator|timeout|playwright/.test(normalized)) {
+    return "test_code";
+  }
+  if (/expect|assert/.test(normalized)) {
+    return "assertion";
+  }
+  if (/browser|process|spawn|install|enoent|eacces|connection refused/.test(normalized)) {
+    return "runner";
+  }
+  return "unknown";
 }
 async function toRunnerSummary(summary, definitions, artifactDirectory) {
   const definitionById = new Map(definitions.map((test) => [test.testId, test]));
@@ -1955,6 +2107,10 @@ async function handleRunnerRequest(request, response, context) {
     const session = context.sessions.get(sessionRoute.sessionId);
     const browserSession = session.browserSession;
     switch (sessionRoute.action) {
+      case "prepare": {
+        sendJson(response, 200, await context.sessions.prepare(sessionRoute.sessionId));
+        return;
+      }
       case "navigate": {
         const body = await readJsonBody(request);
         validateRequiredString(body.url, "url");
@@ -2019,6 +2175,13 @@ async function handleRunnerRequest(request, response, context) {
         const body = await readJsonBody(request);
         validateRequiredString(body.name, "name");
         validateRequiredString(body.source, "source");
+        if (body.environment) {
+          throw new RunnerHttpError(
+            400,
+            "draft_environment_not_allowed",
+            "Draft validation uses the prepared session and does not accept an environment payload."
+          );
+        }
         sendJson(response, 200, await browserSession.validateDraft(body));
         return;
       }
@@ -2055,6 +2218,7 @@ function matchSessionRoute(pathname) {
     "screenshot",
     "console",
     "network",
+    "prepare",
     "validate-draft"
   ].includes(action)) {
     return null;
@@ -2094,6 +2258,9 @@ var import_node_crypto3 = require("crypto");
 
 // src/runner-core/browser-session.ts
 var import_playwright = require("playwright");
+var import_promises3 = require("fs/promises");
+var import_node_os3 = require("os");
+var import_node_path6 = require("path");
 init_playwright_install();
 
 // src/runner-core/browser-tools.ts
@@ -2319,6 +2486,87 @@ function extractSnapshot(args) {
   };
 }
 
+// src/runner-core/session-auth.ts
+var USERNAME_SELECTORS = [
+  'input[type="email"]:visible',
+  'input[name="email"]:visible',
+  'input[name="username"]:visible',
+  'input[autocomplete="username"]:visible',
+  'input[type="text"]:visible'
+];
+async function prepareRunnerSession(page, environment, timeoutMs) {
+  if (!environment || environment.authMode === "none") {
+    return ready(page);
+  }
+  if (environment.authMode === "custom_instructions") {
+    if (requiresHumanOrSecret(environment.loginInstructions)) {
+      return blocked(
+        "Custom login instructions require a secret, MFA, or human action.",
+        "unsupported_auth_flow",
+        page
+      );
+    }
+    return ready(page, "Custom login instructions are available to the authoring worker.");
+  }
+  if (environment.authMode !== "username_password" || !environment.username || !environment.password) {
+    return blocked("Runner login credentials are unavailable.", "missing_credentials", page);
+  }
+  try {
+    await page.goto(environment.loginUrl ?? environment.baseUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs
+    });
+    const username = await findUsernameInput(page, timeoutMs);
+    const password = page.locator('input[type="password"]:visible').first();
+    if (!username || !await password.isVisible({ timeout: Math.min(timeoutMs, 5e3) }).catch(() => false)) {
+      return blocked("Runner could not find the configured login fields.", "login_fields_missing", page);
+    }
+    await username.fill(environment.username, { timeout: timeoutMs });
+    await password.fill(environment.password, { timeout: timeoutMs });
+    await password.press("Enter", { timeout: timeoutMs });
+    await verify(page, environment, timeoutMs);
+    return ready(page, "Runner login completed.");
+  } catch (error) {
+    return blocked("Runner login failed.", isTimeout(error) ? "auth_timeout" : "auth_failed", page);
+  }
+}
+async function findUsernameInput(page, timeoutMs) {
+  for (const selector of USERNAME_SELECTORS) {
+    const locator = page.locator(selector).first();
+    if (await locator.isVisible({ timeout: Math.min(timeoutMs, 2e3) }).catch(() => false)) {
+      return locator;
+    }
+  }
+  return null;
+}
+async function verify(page, environment, timeoutMs) {
+  const verification = environment.postLoginVerification;
+  if (!verification) {
+    return;
+  }
+  if (verification.type === "url_contains") {
+    await page.waitForURL(`**${verification.value}**`, { timeout: timeoutMs });
+    return;
+  }
+  if (verification.type === "selector_exists") {
+    await page.locator(verification.value).first().waitFor({ state: "visible", timeout: timeoutMs });
+    return;
+  }
+  await page.getByText(verification.value, { exact: false }).first().waitFor({ state: "visible", timeout: timeoutMs });
+}
+function ready(page, summary = "Runner session is ready.") {
+  return { status: "ready", summary, errorCode: null, url: page.url() };
+}
+function blocked(summary, errorCode, page) {
+  return { status: "blocked", summary, errorCode, url: page.url() };
+}
+function isTimeout(error) {
+  return error instanceof Error && (error.name === "TimeoutError" || /timeout/i.test(error.message));
+}
+function requiresHumanOrSecret(instructions) {
+  return /\b(password|secret|token|api[ _-]?key|mfa|2fa|otp|one[- ]time|captcha|human|manually)\b/i.test(instructions ?? "");
+}
+
 // src/runner-core/browser-session.ts
 var MAX_RING_ENTRIES = 100;
 var BrowserSession = class _BrowserSession {
@@ -2338,6 +2586,7 @@ var BrowserSession = class _BrowserSession {
     session.context = await session.browser.newContext({
       baseURL: options.baseUrl ?? void 0
     });
+    await session.configureOriginGuard();
     session.page = await session.context.newPage();
     session.attachPageEvents(session.page);
     return session;
@@ -2359,13 +2608,14 @@ var BrowserSession = class _BrowserSession {
     };
   }
   async snapshot(request) {
-    return await buildBrowserSnapshot(this.requirePage(), request, {
+    const snapshot = await buildBrowserSnapshot(this.requirePage(), request, {
       artifactDirectory: this.options.artifactDirectory,
       consoleErrors: this.getConsoleEntries().filter(
         (entry) => ["error", "pageerror"].includes(entry.level)
       ),
       networkErrors: this.getNetworkEntries()
     });
+    return redactSnapshot(snapshot, this.explicitSecrets());
   }
   async click(request) {
     await resolveLocator(this.requirePage(), request.locator).click({
@@ -2408,7 +2658,8 @@ var BrowserSession = class _BrowserSession {
   async screenshot(request) {
     const data = await this.requirePage().screenshot({
       fullPage: request.fullPage,
-      animations: "disabled"
+      animations: "disabled",
+      mask: [this.requirePage().locator(SENSITIVE_SCREENSHOT_SELECTOR)]
     });
     return await writeArtifact(
       this.options.artifactDirectory,
@@ -2424,10 +2675,30 @@ var BrowserSession = class _BrowserSession {
   getNetworkEntries() {
     return [...this.networkEntries];
   }
+  async prepare() {
+    return await prepareRunnerSession(
+      this.requirePage(),
+      this.options.environment,
+      this.options.timeoutMs
+    );
+  }
   async validateDraft(request) {
-    return await validateDraftPlaywrightTest(request, {
-      artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory
-    });
+    const context = this.context;
+    if (!context) {
+      throw new Error("Browser session is closed.");
+    }
+    const stateDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path6.join)((0, import_node_os3.tmpdir)(), "testmutant-session-state-"));
+    const storageStatePath = (0, import_node_path6.join)(stateDirectory, "storage-state.json");
+    try {
+      await context.storageState({ path: storageStatePath });
+      return await validateDraftPlaywrightTest(request, {
+        artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory,
+        storageStatePath,
+        explicitSecrets: this.explicitSecrets()
+      });
+    } finally {
+      await (0, import_promises3.rm)(stateDirectory, { recursive: true, force: true });
+    }
   }
   async close() {
     await this.context?.close().catch(() => {
@@ -2448,23 +2719,23 @@ var BrowserSession = class _BrowserSession {
     page.on("console", (message) => {
       pushRing(this.consoleEntries, {
         level: message.type(),
-        message: redactSensitiveText(message.text()),
+        message: redactSensitiveText(message.text(), this.explicitSecrets()),
         timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
     page.on("pageerror", (error) => {
       pushRing(this.consoleEntries, {
         level: "pageerror",
-        message: safeErrorMessage(error),
+        message: safeErrorMessage(error, this.explicitSecrets()),
         timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
     page.on("requestfailed", (request) => {
       pushRing(this.networkEntries, {
-        url: redactUrl(request.url()),
+        url: redactSensitiveText(redactUrl(request.url()), this.explicitSecrets()),
         method: request.method(),
         status: null,
-        failureText: redactSensitiveText(request.failure()?.errorText ?? "request failed"),
+        failureText: redactSensitiveText(request.failure()?.errorText ?? "request failed", this.explicitSecrets()),
         timestampUtc: (/* @__PURE__ */ new Date()).toISOString()
       });
     });
@@ -2473,7 +2744,7 @@ var BrowserSession = class _BrowserSession {
         return;
       }
       pushRing(this.networkEntries, {
-        url: redactUrl(response.url()),
+        url: redactSensitiveText(redactUrl(response.url()), this.explicitSecrets()),
         method: response.request().method(),
         status: response.status(),
         failureText: null,
@@ -2481,7 +2752,65 @@ var BrowserSession = class _BrowserSession {
       });
     });
   }
+  explicitSecrets() {
+    return [
+      this.options.environment?.username ?? "",
+      this.options.environment?.password ?? ""
+    ].filter(Boolean);
+  }
+  async configureOriginGuard() {
+    const context = this.context;
+    if (!context) {
+      return;
+    }
+    const allowedOrigins = [this.options.baseUrl, this.options.environment?.loginUrl].flatMap((value) => {
+      try {
+        return value ? [new URL(value).origin] : [];
+      } catch {
+        return [];
+      }
+    });
+    if (allowedOrigins.length === 0) {
+      return;
+    }
+    await context.route("**/*", async (route) => {
+      try {
+        const origin = new URL(route.request().url()).origin;
+        if (allowedOrigins.includes(origin)) {
+          await route.continue();
+          return;
+        }
+      } catch {
+      }
+      await route.abort("blockedbyclient");
+    });
+  }
 };
+var SENSITIVE_SCREENSHOT_SELECTOR = [
+  "input[type='password']",
+  "input[name*='password' i]",
+  "input[name*='token' i]",
+  "input[name*='secret' i]",
+  "textarea[name*='secret' i]"
+].join(", ");
+function redactSnapshot(snapshot, secrets) {
+  const redact = (value) => value === null ? null : redactSensitiveText(value, secrets);
+  return {
+    ...snapshot,
+    url: redactSensitiveText(snapshot.url, secrets),
+    title: redact(snapshot.title),
+    visibleTextPreview: redact(snapshot.visibleTextPreview),
+    headings: snapshot.headings.map((item) => ({ ...item, text: redactSensitiveText(item.text, secrets) })),
+    buttons: snapshot.buttons.map((item) => ({ ...item, text: redact(item.text) })),
+    links: snapshot.links.map((item) => ({ ...item, text: redact(item.text) })),
+    consoleErrors: snapshot.consoleErrors.map((item) => ({ ...item, message: redactSensitiveText(item.message, secrets) })),
+    networkErrors: snapshot.networkErrors.map((item) => ({
+      ...item,
+      url: redactSensitiveText(item.url, secrets),
+      failureText: redact(item.failureText)
+    }))
+  };
+}
 function pushRing(entries, entry) {
   entries.push(entry);
   if (entries.length > MAX_RING_ENTRIES) {
@@ -2571,6 +2900,9 @@ var SessionStore = class {
       throw new RunnerHttpError(404, "session_expired", "Runner session has expired.");
     }
     return session;
+  }
+  async prepare(sessionId) {
+    return await this.get(sessionId).browserSession.prepare();
   }
   async end(sessionId) {
     const session = this.sessions.get(sessionId);
@@ -3888,9 +4220,9 @@ async function executeEnvironmentCheck(context, options = {}) {
       statusReason: result.statusReason ? redactSecrets(result.statusReason, context) : null
     };
   } catch (error) {
-    const isTimeout = isTimeoutError2(error);
+    const isTimeout2 = isTimeoutError2(error);
     return {
-      status: isTimeout ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
+      status: isTimeout2 ? EnvironmentCheckStatus.Timeout : EnvironmentCheckStatus.BaseUrlUnreachable,
       statusReason: redactSecrets(extractErrorMessage(error), context),
       screenshotBuffer: null
     };
@@ -4084,7 +4416,7 @@ async function verifyPostLoginHint(page, context, startMs) {
   }
   return null;
 }
-var USERNAME_SELECTORS = [
+var USERNAME_SELECTORS2 = [
   'input[type="email"]:visible',
   'input[name="email"]:visible',
   'input[name="username"]:visible',
@@ -4099,7 +4431,7 @@ var USERNAME_SELECTORS = [
 ];
 async function findUsernameField(page, timeoutMs) {
   const waitTimeout = Math.min(5e3, timeoutMs);
-  for (const selector of USERNAME_SELECTORS) {
+  for (const selector of USERNAME_SELECTORS2) {
     const locator = page.locator(selector).first();
     const found = await locator.waitFor({ state: "visible", timeout: waitTimeout }).then(() => true).catch(() => false);
     if (found) {
@@ -4541,7 +4873,7 @@ program.parseAsync(process.argv).catch((error) => {
   process.exitCode = 1;
 });
 function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path6.join)(__dirname, "..", "package.json");
+  const packageJsonPath = (0, import_node_path7.join)(__dirname, "..", "package.json");
   const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
   return {
     name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",

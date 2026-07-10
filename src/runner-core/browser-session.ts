@@ -1,9 +1,13 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ensurePlaywrightBrowserInstalled } from "../playwright-install";
 import { writeArtifact } from "./artifacts";
 import { buildBrowserSnapshot } from "./browser-snapshot";
 import { resolveLocator } from "./browser-tools";
 import { safeErrorMessage, redactSensitiveText, redactUrl } from "./redaction";
+import { prepareRunnerSession } from "./session-auth";
 import type {
   BrowserSnapshotRequest,
   BrowserSnapshotResponse,
@@ -16,6 +20,7 @@ import type {
   RunnerArtifactReference,
   RunnerLogEntry,
   RunnerNetworkEntry,
+  RunnerSessionPreparationResponse,
   ScreenshotRequest,
   SelectRequest,
   ValidateDraftPlaywrightTestRequest,
@@ -49,6 +54,7 @@ export class BrowserSession {
     session.context = await session.browser.newContext({
       baseURL: options.baseUrl ?? undefined,
     });
+    await session.configureOriginGuard();
     session.page = await session.context.newPage();
     session.attachPageEvents(session.page);
     return session;
@@ -73,13 +79,14 @@ export class BrowserSession {
   }
 
   async snapshot(request: BrowserSnapshotRequest): Promise<BrowserSnapshotResponse> {
-    return await buildBrowserSnapshot(this.requirePage(), request, {
+    const snapshot = await buildBrowserSnapshot(this.requirePage(), request, {
       artifactDirectory: this.options.artifactDirectory,
       consoleErrors: this.getConsoleEntries().filter((entry) =>
         ["error", "pageerror"].includes(entry.level),
       ),
       networkErrors: this.getNetworkEntries(),
     });
+    return redactSnapshot(snapshot, this.explicitSecrets());
   }
 
   async click(request: ClickRequest): Promise<BrowserSnapshotResponse> {
@@ -129,6 +136,7 @@ export class BrowserSession {
     const data = await this.requirePage().screenshot({
       fullPage: request.fullPage,
       animations: "disabled",
+      mask: [this.requirePage().locator(SENSITIVE_SCREENSHOT_SELECTOR)],
     });
     return await writeArtifact(
       this.options.artifactDirectory,
@@ -147,12 +155,33 @@ export class BrowserSession {
     return [...this.networkEntries];
   }
 
+  async prepare(): Promise<RunnerSessionPreparationResponse> {
+    return await prepareRunnerSession(
+      this.requirePage(),
+      this.options.environment,
+      this.options.timeoutMs,
+    );
+  }
+
   async validateDraft(
     request: ValidateDraftPlaywrightTestRequest,
   ): Promise<ValidateDraftPlaywrightTestResponse> {
-    return await validateDraftPlaywrightTest(request, {
-      artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory,
-    });
+    const context = this.context;
+    if (!context) {
+      throw new Error("Browser session is closed.");
+    }
+    const stateDirectory = await mkdtemp(join(tmpdir(), "testmutant-session-state-"));
+    const storageStatePath = join(stateDirectory, "storage-state.json");
+    try {
+      await context.storageState({ path: storageStatePath });
+      return await validateDraftPlaywrightTest(request, {
+        artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory,
+        storageStatePath,
+        explicitSecrets: this.explicitSecrets(),
+      });
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   }
 
   async close(): Promise<void> {
@@ -175,7 +204,7 @@ export class BrowserSession {
     page.on("console", (message) => {
       pushRing(this.consoleEntries, {
         level: message.type(),
-        message: redactSensitiveText(message.text()),
+        message: redactSensitiveText(message.text(), this.explicitSecrets()),
         timestampUtc: new Date().toISOString(),
       });
     });
@@ -183,17 +212,17 @@ export class BrowserSession {
     page.on("pageerror", (error) => {
       pushRing(this.consoleEntries, {
         level: "pageerror",
-        message: safeErrorMessage(error),
+        message: safeErrorMessage(error, this.explicitSecrets()),
         timestampUtc: new Date().toISOString(),
       });
     });
 
     page.on("requestfailed", (request) => {
       pushRing(this.networkEntries, {
-        url: redactUrl(request.url()),
+        url: redactSensitiveText(redactUrl(request.url()), this.explicitSecrets()),
         method: request.method(),
         status: null,
-        failureText: redactSensitiveText(request.failure()?.errorText ?? "request failed"),
+        failureText: redactSensitiveText(request.failure()?.errorText ?? "request failed", this.explicitSecrets()),
         timestampUtc: new Date().toISOString(),
       });
     });
@@ -203,7 +232,7 @@ export class BrowserSession {
         return;
       }
       pushRing(this.networkEntries, {
-        url: redactUrl(response.url()),
+        url: redactSensitiveText(redactUrl(response.url()), this.explicitSecrets()),
         method: response.request().method(),
         status: response.status(),
         failureText: null,
@@ -211,6 +240,69 @@ export class BrowserSession {
       });
     });
   }
+
+  private explicitSecrets(): string[] {
+    return [
+      this.options.environment?.username ?? "",
+      this.options.environment?.password ?? "",
+    ].filter(Boolean);
+  }
+
+  private async configureOriginGuard(): Promise<void> {
+    const context = this.context;
+    if (!context) {
+      return;
+    }
+    const allowedOrigins = [this.options.baseUrl, this.options.environment?.loginUrl]
+      .flatMap((value) => {
+        try {
+          return value ? [new URL(value).origin] : [];
+        } catch {
+          return [];
+        }
+      });
+    if (allowedOrigins.length === 0) {
+      return;
+    }
+    await context.route("**/*", async (route) => {
+      try {
+        const origin = new URL(route.request().url()).origin;
+        if (allowedOrigins.includes(origin)) {
+          await route.continue();
+          return;
+        }
+      } catch {
+      }
+      await route.abort("blockedbyclient");
+    });
+  }
+}
+
+const SENSITIVE_SCREENSHOT_SELECTOR = [
+  "input[type='password']",
+  "input[name*='password' i]",
+  "input[name*='token' i]",
+  "input[name*='secret' i]",
+  "textarea[name*='secret' i]",
+].join(", ");
+
+function redactSnapshot(snapshot: BrowserSnapshotResponse, secrets: string[]): BrowserSnapshotResponse {
+  const redact = (value: string | null): string | null => value === null ? null : redactSensitiveText(value, secrets);
+  return {
+    ...snapshot,
+    url: redactSensitiveText(snapshot.url, secrets),
+    title: redact(snapshot.title),
+    visibleTextPreview: redact(snapshot.visibleTextPreview),
+    headings: snapshot.headings.map((item) => ({ ...item, text: redactSensitiveText(item.text, secrets) })),
+    buttons: snapshot.buttons.map((item) => ({ ...item, text: redact(item.text) })),
+    links: snapshot.links.map((item) => ({ ...item, text: redact(item.text) })),
+    consoleErrors: snapshot.consoleErrors.map((item) => ({ ...item, message: redactSensitiveText(item.message, secrets) })),
+    networkErrors: snapshot.networkErrors.map((item) => ({
+      ...item,
+      url: redactSensitiveText(item.url, secrets),
+      failureText: redact(item.failureText),
+    })),
+  };
 }
 
 function pushRing<T>(entries: T[], entry: T): void {

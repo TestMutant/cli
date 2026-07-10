@@ -36,6 +36,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runner/v1/sessions/{sessionId}/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["PrepareInternalRunnerSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runner/v1/sessions/{sessionId}": {
         parameters: {
             query?: never;
@@ -312,6 +328,7 @@ export interface components {
         };
         CreateRunnerSessionRequest: {
             baseUrl: null | string;
+            environment: null | components["schemas"]["InternalRunnerEnvironmentPayload"];
             headless: boolean;
             /** Format: int32 */
             timeoutMs: null | number | string;
@@ -337,6 +354,7 @@ export interface components {
         };
         ExecutePlaywrightTestsRequest: {
             baseUrl: null | string;
+            environment: null | components["schemas"]["InternalRunnerEnvironmentPayload"];
             tests: components["schemas"]["RunnerTestDefinition"][];
             /** Format: int32 */
             perTestTimeoutMs: null | number | string;
@@ -350,6 +368,19 @@ export interface components {
             /** Format: int32 */
             timeoutMs: null | number | string;
             redactValue: boolean;
+        };
+        InternalRunnerEnvironmentPayload: {
+            baseUrl: string;
+            authMode: string;
+            loginUrl: null | string;
+            loginInstructions: null | string;
+            username: null | string;
+            password: null | string;
+            postLoginVerification: null | components["schemas"]["InternalRunnerPostLoginVerification"];
+        };
+        InternalRunnerPostLoginVerification: {
+            type: string;
+            value: string;
         };
         NavigateRequest: {
             url: string;
@@ -420,6 +451,12 @@ export interface components {
             consoleLogs: string[];
             browserObservations: string[];
         };
+        RunnerSessionPreparationResponse: {
+            status: string;
+            summary: string;
+            errorCode: null | string;
+            url: null | string;
+        };
         RunnerTestDefinition: {
             testId: string;
             testSpecId: null | string;
@@ -456,6 +493,7 @@ export interface components {
             name: string;
             source: string;
             baseUrl: null | string;
+            environment: null | components["schemas"]["InternalRunnerEnvironmentPayload"];
             /** Format: int32 */
             timeoutMs: null | number | string;
             artifactDirectory: null | string;
@@ -465,6 +503,7 @@ export interface components {
             summary: components["schemas"]["RunnerExecutionSummary"];
             failureExcerpt: null | string;
             artifacts: components["schemas"]["RunnerArtifactReference"][];
+            failureClassification?: null | string;
         };
     };
     responses: never;
@@ -515,6 +554,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CreateRunnerSessionResponse"];
+                };
+            };
+        };
+    };
+    PrepareInternalRunnerSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunnerSessionPreparationResponse"];
                 };
             };
         };

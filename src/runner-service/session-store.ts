@@ -5,6 +5,7 @@ import type {
   CreateRunnerSessionRequest,
   CreateRunnerSessionResponse,
   EndRunnerSessionResponse,
+  RunnerSessionPreparationResponse,
 } from "../runner-core/runner-contracts";
 import type { RunnerServiceConfig } from "./config";
 import { RunnerHttpError } from "./errors";
@@ -92,6 +93,10 @@ export class SessionStore {
     }
 
     return session;
+  }
+
+  async prepare(sessionId: string): Promise<RunnerSessionPreparationResponse> {
+    return await this.get(sessionId).browserSession.prepare();
   }
 
   async end(sessionId: string): Promise<EndRunnerSessionResponse> {
