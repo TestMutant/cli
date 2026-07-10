@@ -93,6 +93,10 @@ export async function handleRunnerRequest(
     const browserSession = session.browserSession;
 
     switch (sessionRoute.action) {
+      case "prepare": {
+        sendJson(response, 200, await context.sessions.prepare(sessionRoute.sessionId));
+        return;
+      }
       case "navigate": {
         const body = await readJsonBody<NavigateRequest>(request);
         validateRequiredString(body.url, "url");
@@ -157,6 +161,13 @@ export async function handleRunnerRequest(
         const body = await readJsonBody<ValidateDraftPlaywrightTestRequest>(request);
         validateRequiredString(body.name, "name");
         validateRequiredString(body.source, "source");
+        if (body.environment) {
+          throw new RunnerHttpError(
+            400,
+            "draft_environment_not_allowed",
+            "Draft validation uses the prepared session and does not accept an environment payload.",
+          );
+        }
         sendJson(response, 200, await browserSession.validateDraft(body));
         return;
       }
@@ -192,6 +203,7 @@ function matchSessionRoute(pathname: string): {
     | "screenshot"
     | "console"
     | "network"
+    | "prepare"
     | "validate-draft";
 } | null {
   const match = pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -213,6 +225,7 @@ function matchSessionRoute(pathname: string): {
       "screenshot",
       "console",
       "network",
+      "prepare",
       "validate-draft",
     ].includes(action)
   ) {

@@ -21,6 +21,7 @@ export type RunnerCandidateLocator = components["schemas"]["RunnerCandidateLocat
 export type RunnerExecutionSummary = components["schemas"]["RunnerExecutionSummary"];
 export type RunnerLogEntry = components["schemas"]["RunnerLogEntry"];
 export type RunnerNetworkEntry = components["schemas"]["RunnerNetworkEntry"];
+export type RunnerSessionPreparationResponse = components["schemas"]["RunnerSessionPreparationResponse"];
 export type RunnerRepairFeedback = components["schemas"]["RunnerRepairFeedback"];
 export type RunnerTestDefinition = components["schemas"]["RunnerTestDefinition"];
 export type RunnerTestResult = components["schemas"]["RunnerTestResult"];

@@ -527,10 +527,7 @@ async function runPlaywrightTests(tests, options = {}) {
       options
     );
     const commandRunner = options.commandRunner ?? defaultCommandRunner;
-    const runtimeEnv = {
-      ...process.env,
-      NODE_PATH: buildNodePath(process.env.NODE_PATH)
-    };
+    const runtimeEnv = buildSterileRuntimeEnvironment();
     await ensureBrowserInstalledForRun(commandRunner, workDir, runtimeEnv, options.signal);
     const result = await commandRunner(
       process.execPath,
@@ -573,6 +570,7 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
       "  workers: 1,",
       "  use: {",
       `    baseURL: ${JSON.stringify(baseUrl)},`,
+      options.storageStatePath ? `    storageState: ${JSON.stringify(options.storageStatePath)},` : "",
       "    screenshot: 'only-on-failure',",
       `    trace: '${traceMode}',`,
       `    video: '${videoMode}',`,
@@ -586,7 +584,7 @@ async function writePlaywrightWorkspace(workDir, tests, options) {
   if (captureStepEvidence) {
     await (0, import_promises.writeFile)(
       (0, import_node_path2.join)(workDir, STEP_RECORDER_FILE_NAME),
-      TESTMUTANT_STEP_RECORDER_SOURCE,
+      createStepRecorderSource(baseUrl),
       "utf8"
     );
   }
@@ -901,6 +899,19 @@ function instrumentPlaywrightTestSource(source) {
     `require("./${STEP_RECORDER_FILE_NAME.replace(/\.ts$/, "")}")`
   );
 }
+function createStepRecorderSource(baseUrl) {
+  const allowedOrigins = baseUrl ? (() => {
+    try {
+      return [new URL(baseUrl).origin];
+    } catch {
+      return [];
+    }
+  })() : [];
+  return TESTMUTANT_STEP_RECORDER_SOURCE.replace(
+    "__TESTMUTANT_ALLOWED_ORIGINS__",
+    JSON.stringify(allowedOrigins)
+  );
+}
 function coerceNullableNumber(value) {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -1048,6 +1059,27 @@ function buildNodePath(existing) {
     (0, import_node_path2.dirname)((0, import_node_path2.dirname)(runtimeRequire.resolve("@playwright/test")))
   );
   return existing ? `${dependencyPath}${delimiter()}${existing}` : dependencyPath;
+}
+function buildSterileRuntimeEnvironment() {
+  const values = {
+    NODE_PATH: buildNodePath(process.env.NODE_PATH)
+  };
+  for (const name of [
+    "PATH",
+    "Path",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "PLAYWRIGHT_BROWSERS_PATH"
+  ]) {
+    const value = process.env[name];
+    if (value) {
+      values[name] = value;
+    }
+  }
+  return values;
 }
 function getPlaywrightInstallArgs() {
   if (process.platform === "linux") {
@@ -1257,6 +1289,7 @@ const SENSITIVE_SCREENSHOT_SELECTOR = [
   "textarea[name*='secret' i]",
   "textarea[name*='token' i]"
 ].join(", ");
+const ALLOWED_ORIGINS = __TESTMUTANT_ALLOWED_ORIGINS__;
 
 const storage = new AsyncLocalStorage<EvidenceContext>();
 
@@ -1275,6 +1308,16 @@ const test = base.extend<{ _testmutantEvidence: void }>({
       networkCapped: false
     };
 
+    await page.route("**/*", async (route) => {
+      try {
+        if (ALLOWED_ORIGINS.includes(new URL(route.request().url()).origin)) {
+          await route.continue();
+          return;
+        }
+      } catch {
+      }
+      await route.abort("blockedbyclient");
+    });
     attachPageEvents(page, context);
     await storage.run(context, async () => {
       try {

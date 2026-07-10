@@ -8,6 +8,7 @@ import {
   type TestRunResult,
   type TestRunSummary,
 } from "./playwright-execution";
+import { validateGeneratedPlaywrightSource } from "./generated-source-policy";
 import type {
   ExecutePlaywrightTestsRequest,
   RunnerArtifactReference,
@@ -20,6 +21,8 @@ import type {
 
 export type InternalPlaywrightExecutionOptions = {
   artifactDirectory: string;
+  storageStatePath?: string | null;
+  explicitSecrets?: string[];
   signal?: AbortSignal;
 };
 
@@ -31,6 +34,7 @@ export async function executeRunnerTests(
     request.tests.map(toCoreTestDefinition),
     {
       baseUrl: request.baseUrl,
+      storageStatePath: options.storageStatePath,
       perTestTimeoutMs: toNumber(request.perTestTimeoutMs) ?? undefined,
       traceMode: "retain-on-failure",
       videoMode: "retain-on-failure",
@@ -47,6 +51,26 @@ export async function validateDraftPlaywrightTest(
   request: ValidateDraftPlaywrightTestRequest,
   options: InternalPlaywrightExecutionOptions,
 ): Promise<ValidateDraftPlaywrightTestResponse> {
+  const policy = validateGeneratedPlaywrightSource(request.source, options.explicitSecrets);
+  if (!policy.valid) {
+    return {
+      passed: false,
+      summary: {
+        kind: "playwright",
+        baseUrl: request.baseUrl,
+        total: 0,
+        passed: 0,
+        failed: 1,
+        skipped: 0,
+        errored: 0,
+        tests: [],
+      },
+      failureExcerpt: policy.error,
+      artifacts: [],
+      failureClassification: "test_code",
+    };
+  }
+
   const test: RunnerTestDefinition = {
     testId: "generated-draft",
     testSpecId: null,
@@ -58,6 +82,7 @@ export async function validateDraftPlaywrightTest(
   const summary = await executeRunnerTests(
     {
       baseUrl: request.baseUrl,
+      environment: null,
       tests: [test],
       perTestTimeoutMs: request.timeoutMs,
       runTimeoutMs: null,
@@ -76,7 +101,22 @@ export async function validateDraftPlaywrightTest(
     summary,
     failureExcerpt: failure?.errorMessage ?? null,
     artifacts: summary.tests.flatMap((candidate) => candidate.artifacts),
+    failureClassification: failure ? classifyFailure(failure.errorMessage) : null,
   };
+}
+
+function classifyFailure(message: string | null): string {
+  const normalized = (message ?? "").toLowerCase();
+  if (/syntax|cannot find module|strict mode|locator|timeout|playwright/.test(normalized)) {
+    return "test_code";
+  }
+  if (/expect|assert/.test(normalized)) {
+    return "assertion";
+  }
+  if (/browser|process|spawn|install|enoent|eacces|connection refused/.test(normalized)) {
+    return "runner";
+  }
+  return "unknown";
 }
 
 async function toRunnerSummary(

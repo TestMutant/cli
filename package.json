@@ -1,6 +1,6 @@
 {
   "name": "@testmutant/cli",
-  "version": "1.0.0-alpha.8",
+  "version": "1.0.0-alpha.9",
   "description": "TestMutant CLI.",
   "private": false,
   "main": "dist/index.js",
@@ -47,6 +47,7 @@
     "commander": "^14.0.3",
     "dotenv": "^17.4.2",
     "playwright": "^1.60.0",
+    "typescript": "^6.0.3",
     "ws": "^8.21.0"
   },
   "devDependencies": {
@@ -54,7 +55,6 @@
     "@types/ws": "^8.18.1",
     "simple-git-hooks": "^2.13.1",
     "tsup": "^8.5.1",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "tsx": "^4.22.4"
   }
 }
