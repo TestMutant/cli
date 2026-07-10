@@ -55,6 +55,7 @@ export class SessionStore {
     const browserSession = await BrowserSession.create({
       sessionId,
       baseUrl: request.baseUrl,
+      environment: request.environment ?? null,
       artifactDirectory,
       headless: request.headless ?? this.config.headless,
       timeoutMs: toNumber(request.timeoutMs) ?? this.config.sessionTimeoutMs,

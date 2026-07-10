@@ -29,6 +29,7 @@ export type ScreenshotRequest = components["schemas"]["ScreenshotRequest"];
 export type SelectRequest = components["schemas"]["SelectRequest"];
 export type ValidateDraftPlaywrightTestRequest = components["schemas"]["ValidateDraftPlaywrightTestRequest"];
 export type ValidateDraftPlaywrightTestResponse = components["schemas"]["ValidateDraftPlaywrightTestResponse"];
+export type InternalRunnerEnvironmentPayload = components["schemas"]["InternalRunnerEnvironmentPayload"];
 
 export type RunnerHealthResponse = {
   status: "ok" | "degraded";
