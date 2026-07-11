@@ -26,8 +26,10 @@ import type {
   ValidateDraftPlaywrightTestRequest,
   ValidateDraftPlaywrightTestResponse,
   InternalRunnerEnvironmentPayload,
+  ExecutePlaywrightTestsRequest,
+  RunnerExecutionSummary,
 } from "./runner-contracts";
-import { validateDraftPlaywrightTest } from "./playwright-runner-adapter";
+import { executeRunnerTests, validateDraftPlaywrightTest } from "./playwright-runner-adapter";
 
 const MAX_RING_ENTRIES = 100;
 
@@ -180,6 +182,30 @@ export class BrowserSession {
         artifactDirectory: request.artifactDirectory ?? this.options.artifactDirectory,
         storageStatePath,
         explicitSecrets: this.explicitSecrets(),
+      });
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  }
+
+  async executeTests(
+    request: ExecutePlaywrightTestsRequest,
+    artifactDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<RunnerExecutionSummary> {
+    const context = this.context;
+    if (!context) throw new Error("Browser session is closed.");
+    const stateDirectory = await mkdtemp(join(tmpdir(), "testmutant-session-state-"));
+    const storageStatePath = join(stateDirectory, "storage-state.json");
+    try {
+      await context.storageState({ path: storageStatePath });
+      return await executeRunnerTests({ ...request, environment: null }, {
+        artifactDirectory,
+        storageStatePath,
+        explicitSecrets: this.explicitSecrets(),
+        signal,
+        traceMode: "retain-on-failure",
+        videoMode: "off",
       });
     } finally {
       await rm(stateDirectory, { recursive: true, force: true });

@@ -22,10 +22,12 @@ import type { RunnerServiceConfig } from "./config";
 import { RunnerHttpError } from "./errors";
 import { sendError, sendJson } from "./response";
 import type { SessionStore } from "./session-store";
+import type { ExecutionArtifactStore } from "./execution-artifact-store";
 
 export type RouteContext = {
   config: RunnerServiceConfig;
   sessions: SessionStore;
+  executions: ExecutionArtifactStore;
 };
 
 const CAPABILITIES = [
@@ -33,6 +35,8 @@ const CAPABILITIES = [
   "playwright",
   "browser.session",
   "draft.validation",
+  "regression.execution.v1",
+  "artifact.download.v1",
 ];
 
 export async function handleRunnerRequest(
@@ -55,6 +59,28 @@ export async function handleRunnerRequest(
       throw new RunnerHttpError(404, "not_found", "Runner endpoint was not found.");
     }
 
+    const executionArtifactRoute = pathname.match(/^\/v1\/executions\/([^/]+)\/artifacts\/([^/]+)$/);
+    if (request.method === "GET" && executionArtifactRoute) {
+      const artifact = context.executions.open(
+        decodeURIComponent(executionArtifactRoute[1] ?? ""),
+        decodeURIComponent(executionArtifactRoute[2] ?? ""),
+      );
+      if (!artifact) throw new RunnerHttpError(404, "artifact_not_found", "Runner artifact was not found.");
+      response.statusCode = 200;
+      response.setHeader("Content-Type", artifact.contentType);
+      if (artifact.sizeBytes !== null) response.setHeader("Content-Length", artifact.sizeBytes);
+      artifact.stream.on("error", () => response.destroy());
+      artifact.stream.pipe(response);
+      return;
+    }
+
+    const executionRoute = pathname.match(/^\/v1\/executions\/([^/]+)$/);
+    if (request.method === "DELETE" && executionRoute) {
+      await context.executions.cleanup(decodeURIComponent(executionRoute[1] ?? ""));
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
     if (request.method === "POST" && pathname === "/v1/sessions") {
       const body = await readJsonBody<CreateRunnerSessionRequest>(request);
       validateCreateSession(body);
@@ -71,7 +97,8 @@ export async function handleRunnerRequest(
         executionId,
         body.artifactDirectory,
       );
-      sendJson(response, 200, await executeRunnerTests(body, { artifactDirectory }));
+      const summary = await executeRunnerTests(body, { artifactDirectory });
+      sendJson(response, 200, context.executions.register(executionId, artifactDirectory, summary));
       return;
     }
 
@@ -171,6 +198,21 @@ export async function handleRunnerRequest(
         sendJson(response, 200, await browserSession.validateDraft(body));
         return;
       }
+      case "execute-tests": {
+        const body = await readJsonBody<ExecutePlaywrightTestsRequest>(request);
+        validateExecuteTests(body);
+        const executionId = randomUUID();
+        const artifactDirectory = resolveArtifactDirectory(
+          session.artifactDirectory,
+          executionId,
+          null,
+        );
+        const controller = new AbortController();
+        request.once("aborted", () => controller.abort());
+        const summary = await browserSession.executeTests(body, artifactDirectory, controller.signal);
+        sendJson(response, 200, context.executions.register(executionId, artifactDirectory, summary));
+        return;
+      }
     }
   } catch (error) {
     sendError(response, error, [context.config.token ?? ""]);
@@ -204,7 +246,8 @@ function matchSessionRoute(pathname: string): {
     | "console"
     | "network"
     | "prepare"
-    | "validate-draft";
+    | "validate-draft"
+    | "execute-tests";
 } | null {
   const match = pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) {
@@ -227,6 +270,7 @@ function matchSessionRoute(pathname: string): {
       "network",
       "prepare",
       "validate-draft",
+      "execute-tests",
     ].includes(action)
   ) {
     return null;

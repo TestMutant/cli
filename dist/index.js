@@ -104,7 +104,7 @@ async function ensurePlaywrightBrowserInstalled() {
   }
 }
 function execNode(args) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     (0, import_node_child_process.execFile)(
       process.execPath,
       args,
@@ -113,7 +113,7 @@ function execNode(args) {
       },
       (error, stdout, stderr) => {
         const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-        resolve2({ exitCode, stdout, stderr });
+        resolve3({ exitCode, stdout, stderr });
       }
     );
   });
@@ -787,7 +787,7 @@ function delimiter() {
   return process.platform === "win32" ? ";" : ":";
 }
 function defaultCommandRunner(command, args, options) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const child = (0, import_node_child_process2.execFile)(
       command,
       args,
@@ -798,7 +798,7 @@ function defaultCommandRunner(command, args, options) {
       },
       (error, stdout, stderr) => {
         const exitCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? error.code : error ? 1 : 0;
-        resolve2({
+        resolve3({
           exitCode,
           stdout,
           stderr
@@ -1244,7 +1244,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
   let activeToolCalls = 0;
   let closeAfterToolCalls = false;
   let generationResult = null;
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     const timeout2 = setTimeout(() => {
       fail(new CliError(`TestMutant agent generation timed out after ${options.timeoutMs} ms.`));
     }, options.timeoutMs);
@@ -1256,7 +1256,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       settled = true;
       clearTimeout(timeout2);
       socket.close();
-      resolve2();
+      resolve3();
     };
     const fail = (error) => {
       if (settled) {
@@ -1280,7 +1280,7 @@ async function runAgentWebSocketLoop(options, browserDriver) {
       if (!settled && activeToolCalls === 0) {
         settled = true;
         clearTimeout(timeout2);
-        resolve2();
+        resolve3();
         return;
       }
       closeAfterToolCalls = true;
@@ -1577,8 +1577,8 @@ var init_agent_runner = __esm({
 
 // src/index.ts
 var import_config8 = require("dotenv/config");
-var import_node_fs2 = require("fs");
-var import_node_path7 = require("path");
+var import_node_fs3 = require("fs");
+var import_node_path8 = require("path");
 
 // src/runner-service/config.ts
 var import_node_crypto = require("crypto");
@@ -1777,14 +1777,20 @@ async function executeRunnerTests(request, options) {
       baseUrl: request.baseUrl,
       storageStatePath: options.storageStatePath,
       perTestTimeoutMs: toNumber(request.perTestTimeoutMs) ?? void 0,
-      traceMode: "retain-on-failure",
-      videoMode: "retain-on-failure",
+      traceMode: options.traceMode ?? "retain-on-failure",
+      videoMode: options.videoMode ?? "retain-on-failure",
       captureRepairFeedback: true,
       captureStepEvidence: true,
-      signal: options.signal
+      signal: executionSignal(options.signal, request.runTimeoutMs)
     }
   );
   return toRunnerSummary(summary, request.tests, options.artifactDirectory);
+}
+function executionSignal(signal, runTimeoutMs) {
+  const parsed = toNumber(runTimeoutMs);
+  if (!parsed) return signal;
+  const timeoutSignal = AbortSignal.timeout(parsed);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 async function validateDraftPlaywrightTest(request, options) {
   const policy = validateGeneratedPlaywrightSource(request.source, options.explicitSecrets);
@@ -1899,6 +1905,21 @@ async function writeTestArtifacts(test, artifactDirectory) {
         `${prefix}-${descriptor.kind}${descriptor.extension}`,
         descriptor.contentType,
         buffer
+      )
+    );
+  }
+  if (test.status !== "Passed" && (test.repairFeedback || test.evidence)) {
+    artifacts.push(
+      await writeArtifact(
+        (0, import_node_path5.join)(artifactDirectory, prefix),
+        "structured_report",
+        `${prefix}-execution-evidence.json`,
+        "application/json",
+        Buffer.from(JSON.stringify({
+          schemaVersion: 1,
+          repairFeedback: test.repairFeedback ?? null,
+          evidence: test.evidence ?? null
+        }))
       )
     );
   }
@@ -2061,7 +2082,9 @@ var CAPABILITIES = [
   "browser.chromium",
   "playwright",
   "browser.session",
-  "draft.validation"
+  "draft.validation",
+  "regression.execution.v1",
+  "artifact.download.v1"
 ];
 async function handleRunnerRequest(request, response, context) {
   try {
@@ -2074,6 +2097,26 @@ async function handleRunnerRequest(request, response, context) {
     }
     if (!pathname.startsWith("/v1")) {
       throw new RunnerHttpError(404, "not_found", "Runner endpoint was not found.");
+    }
+    const executionArtifactRoute = pathname.match(/^\/v1\/executions\/([^/]+)\/artifacts\/([^/]+)$/);
+    if (request.method === "GET" && executionArtifactRoute) {
+      const artifact = context.executions.open(
+        decodeURIComponent(executionArtifactRoute[1] ?? ""),
+        decodeURIComponent(executionArtifactRoute[2] ?? "")
+      );
+      if (!artifact) throw new RunnerHttpError(404, "artifact_not_found", "Runner artifact was not found.");
+      response.statusCode = 200;
+      response.setHeader("Content-Type", artifact.contentType);
+      if (artifact.sizeBytes !== null) response.setHeader("Content-Length", artifact.sizeBytes);
+      artifact.stream.on("error", () => response.destroy());
+      artifact.stream.pipe(response);
+      return;
+    }
+    const executionRoute = pathname.match(/^\/v1\/executions\/([^/]+)$/);
+    if (request.method === "DELETE" && executionRoute) {
+      await context.executions.cleanup(decodeURIComponent(executionRoute[1] ?? ""));
+      sendJson(response, 200, { ok: true });
+      return;
     }
     if (request.method === "POST" && pathname === "/v1/sessions") {
       const body = await readJsonBody(request);
@@ -2090,7 +2133,8 @@ async function handleRunnerRequest(request, response, context) {
         executionId,
         body.artifactDirectory
       );
-      sendJson(response, 200, await executeRunnerTests(body, { artifactDirectory }));
+      const summary = await executeRunnerTests(body, { artifactDirectory });
+      sendJson(response, 200, context.executions.register(executionId, artifactDirectory, summary));
       return;
     }
     const sessionRoute = matchSessionRoute(pathname);
@@ -2185,6 +2229,21 @@ async function handleRunnerRequest(request, response, context) {
         sendJson(response, 200, await browserSession.validateDraft(body));
         return;
       }
+      case "execute-tests": {
+        const body = await readJsonBody(request);
+        validateExecuteTests(body);
+        const executionId = (0, import_node_crypto2.randomUUID)();
+        const artifactDirectory = resolveArtifactDirectory(
+          session.artifactDirectory,
+          executionId,
+          null
+        );
+        const controller = new AbortController();
+        request.once("aborted", () => controller.abort());
+        const summary = await browserSession.executeTests(body, artifactDirectory, controller.signal);
+        sendJson(response, 200, context.executions.register(executionId, artifactDirectory, summary));
+        return;
+      }
     }
   } catch (error) {
     sendError(response, error, [context.config.token ?? ""]);
@@ -2219,7 +2278,8 @@ function matchSessionRoute(pathname) {
     "console",
     "network",
     "prepare",
-    "validate-draft"
+    "validate-draft",
+    "execute-tests"
   ].includes(action)) {
     return null;
   }
@@ -2700,6 +2760,25 @@ var BrowserSession = class _BrowserSession {
       await (0, import_promises3.rm)(stateDirectory, { recursive: true, force: true });
     }
   }
+  async executeTests(request, artifactDirectory, signal) {
+    const context = this.context;
+    if (!context) throw new Error("Browser session is closed.");
+    const stateDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path6.join)((0, import_node_os3.tmpdir)(), "testmutant-session-state-"));
+    const storageStatePath = (0, import_node_path6.join)(stateDirectory, "storage-state.json");
+    try {
+      await context.storageState({ path: storageStatePath });
+      return await executeRunnerTests({ ...request, environment: null }, {
+        artifactDirectory,
+        storageStatePath,
+        explicitSecrets: this.explicitSecrets(),
+        signal,
+        traceMode: "retain-on-failure",
+        videoMode: "off"
+      });
+    } finally {
+      await (0, import_promises3.rm)(stateDirectory, { recursive: true, force: true });
+    }
+  }
   async close() {
     await this.context?.close().catch(() => {
     });
@@ -2933,29 +3012,77 @@ function toNumber2(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+// src/runner-service/execution-artifact-store.ts
+var import_node_fs = require("fs");
+var import_promises4 = require("fs/promises");
+var import_node_path7 = require("path");
+var import_node_crypto4 = require("crypto");
+var ExecutionArtifactStore = class {
+  executions = /* @__PURE__ */ new Map();
+  register(executionId, directory, summary) {
+    const artifacts = /* @__PURE__ */ new Map();
+    const tests = summary.tests.map((test) => ({
+      ...test,
+      artifacts: test.artifacts.map((artifact) => this.registerArtifact(executionId, directory, artifact, artifacts))
+    }));
+    this.executions.set(executionId, { directory: (0, import_node_path7.resolve)(directory), artifacts });
+    return { ...summary, tests, executionId, suiteStatus: "completed" };
+  }
+  open(executionId, artifactId) {
+    const artifact = this.executions.get(executionId)?.artifacts.get(artifactId);
+    return artifact ? { ...artifact, stream: (0, import_node_fs.createReadStream)(artifact.path) } : null;
+  }
+  async cleanup(executionId) {
+    const execution = this.executions.get(executionId);
+    this.executions.delete(executionId);
+    if (execution) await (0, import_promises4.rm)(execution.directory, { recursive: true, force: true });
+  }
+  async closeAll() {
+    await Promise.all([...this.executions.keys()].map((id) => this.cleanup(id)));
+  }
+  registerArtifact(executionId, directory, artifact, artifacts) {
+    if (!artifact.path) return { ...artifact, path: null, artifactId: null, executionId };
+    const root = (0, import_node_path7.resolve)(directory);
+    const path = (0, import_node_path7.resolve)(artifact.path);
+    if (path !== root && !path.startsWith(`${root}\\`) && !path.startsWith(`${root}/`)) {
+      return { ...artifact, path: null, artifactId: null, executionId };
+    }
+    const artifactId = (0, import_node_crypto4.randomUUID)();
+    artifacts.set(artifactId, {
+      path,
+      contentType: artifact.contentType ?? "application/octet-stream",
+      sizeBytes: typeof artifact.sizeBytes === "number" ? artifact.sizeBytes : null
+    });
+    return { ...artifact, path: null, artifactId, executionId };
+  }
+};
+
 // src/runner-service/server.ts
 async function startRunnerService(config) {
   const sessions = new SessionStore(config);
+  const executions = new ExecutionArtifactStore();
   const server = (0, import_node_http.createServer)((request, response) => {
-    void handleRunnerRequest(request, response, { config, sessions }).catch((error) => {
+    void handleRunnerRequest(request, response, { config, sessions, executions }).catch((error) => {
       console.error(`runner-service request failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
       server.off("error", reject);
-      resolve2();
+      resolve3();
     });
   });
   return {
     server,
     sessions,
+    executions,
     async stop() {
-      await new Promise((resolve2) => {
-        server.close(() => resolve2());
+      await new Promise((resolve3) => {
+        server.close(() => resolve3());
       });
       await sessions.closeAll();
+      await executions.closeAll();
     }
   };
 }
@@ -3213,7 +3340,7 @@ function enc(value) {
 
 // src/ci-metadata.ts
 var import_node_child_process3 = require("child_process");
-var import_node_fs = require("fs");
+var import_node_fs2 = require("fs");
 init_config();
 function buildCreateRunRequest(options = {}) {
   const env = process.env;
@@ -3318,11 +3445,11 @@ function detectEnvironmentName(env) {
 }
 function githubEventPullRequestNumber(env) {
   const eventPath = normalize(env.GITHUB_EVENT_PATH);
-  if (!eventPath || !(0, import_node_fs.existsSync)(eventPath)) {
+  if (!eventPath || !(0, import_node_fs2.existsSync)(eventPath)) {
     return null;
   }
   try {
-    const event = JSON.parse((0, import_node_fs.readFileSync)(eventPath, "utf8"));
+    const event = JSON.parse((0, import_node_fs2.readFileSync)(eventPath, "utf8"));
     return numberFromValue(event.pull_request?.number) ?? numberFromValue(event.number);
   } catch {
     return null;
@@ -3916,13 +4043,13 @@ function wait(ms, signal) {
   if (signal.aborted) {
     return Promise.resolve();
   }
-  return new Promise((resolve2) => {
-    const timeout2 = setTimeout(resolve2, ms);
+  return new Promise((resolve3) => {
+    const timeout2 = setTimeout(resolve3, ms);
     signal.addEventListener(
       "abort",
       () => {
         clearTimeout(timeout2);
-        resolve2();
+        resolve3();
       },
       { once: true }
     );
@@ -4874,8 +5001,8 @@ program.parseAsync(process.argv).catch((error) => {
   process.exitCode = 1;
 });
 function readPackageInfo() {
-  const packageJsonPath = (0, import_node_path7.join)(__dirname, "..", "package.json");
-  const packageJson = JSON.parse((0, import_node_fs2.readFileSync)(packageJsonPath, "utf8"));
+  const packageJsonPath = (0, import_node_path8.join)(__dirname, "..", "package.json");
+  const packageJson = JSON.parse((0, import_node_fs3.readFileSync)(packageJsonPath, "utf8"));
   return {
     name: typeof packageJson.name === "string" ? packageJson.name : "@testmutant/cli",
     version: typeof packageJson.version === "string" ? packageJson.version : "0.0.0"
