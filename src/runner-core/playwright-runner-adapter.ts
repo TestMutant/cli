@@ -24,6 +24,8 @@ export type InternalPlaywrightExecutionOptions = {
   storageStatePath?: string | null;
   explicitSecrets?: string[];
   signal?: AbortSignal;
+  traceMode?: "off" | "retain-on-failure" | "on";
+  videoMode?: "off" | "retain-on-failure";
 };
 
 export async function executeRunnerTests(
@@ -36,15 +38,22 @@ export async function executeRunnerTests(
       baseUrl: request.baseUrl,
       storageStatePath: options.storageStatePath,
       perTestTimeoutMs: toNumber(request.perTestTimeoutMs) ?? undefined,
-      traceMode: "retain-on-failure",
-      videoMode: "retain-on-failure",
+      traceMode: options.traceMode ?? "retain-on-failure",
+      videoMode: options.videoMode ?? "retain-on-failure",
       captureRepairFeedback: true,
       captureStepEvidence: true,
-      signal: options.signal,
+      signal: executionSignal(options.signal, request.runTimeoutMs),
     },
   );
 
   return toRunnerSummary(summary, request.tests, options.artifactDirectory);
+}
+
+function executionSignal(signal: AbortSignal | undefined, runTimeoutMs: unknown): AbortSignal | undefined {
+  const parsed = toNumber(runTimeoutMs);
+  if (!parsed) return signal;
+  const timeoutSignal = AbortSignal.timeout(parsed);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
 export async function validateDraftPlaywrightTest(
@@ -185,6 +194,22 @@ async function writeTestArtifacts(
         `${prefix}-${descriptor.kind}${descriptor.extension}`,
         descriptor.contentType,
         buffer,
+      ),
+    );
+  }
+
+  if (test.status !== "Passed" && (test.repairFeedback || test.evidence)) {
+    artifacts.push(
+      await writeArtifact(
+        join(artifactDirectory, prefix),
+        "structured_report",
+        `${prefix}-execution-evidence.json`,
+        "application/json",
+        Buffer.from(JSON.stringify({
+          schemaVersion: 1,
+          repairFeedback: test.repairFeedback ?? null,
+          evidence: test.evidence ?? null,
+        })),
       ),
     );
   }

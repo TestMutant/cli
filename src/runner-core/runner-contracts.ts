@@ -16,15 +16,24 @@ export type FillRequest = components["schemas"]["FillRequest"];
 export type NavigateRequest = components["schemas"]["NavigateRequest"];
 export type NavigateResponse = components["schemas"]["NavigateResponse"];
 export type PressRequest = components["schemas"]["PressRequest"];
-export type RunnerArtifactReference = components["schemas"]["RunnerArtifactReference"];
+export type RunnerArtifactReference = components["schemas"]["RunnerArtifactReference"] & {
+  artifactId?: string | null;
+  executionId?: string | null;
+};
 export type RunnerCandidateLocator = components["schemas"]["RunnerCandidateLocator"];
-export type RunnerExecutionSummary = components["schemas"]["RunnerExecutionSummary"];
+export type RunnerTestResult = Omit<components["schemas"]["RunnerTestResult"], "artifacts"> & {
+  artifacts: RunnerArtifactReference[];
+};
+export type RunnerExecutionSummary = Omit<components["schemas"]["RunnerExecutionSummary"], "tests"> & {
+  tests: RunnerTestResult[];
+  executionId?: string | null;
+  suiteStatus?: string | null;
+};
 export type RunnerLogEntry = components["schemas"]["RunnerLogEntry"];
 export type RunnerNetworkEntry = components["schemas"]["RunnerNetworkEntry"];
 export type RunnerSessionPreparationResponse = components["schemas"]["RunnerSessionPreparationResponse"];
 export type RunnerRepairFeedback = components["schemas"]["RunnerRepairFeedback"];
 export type RunnerTestDefinition = components["schemas"]["RunnerTestDefinition"];
-export type RunnerTestResult = components["schemas"]["RunnerTestResult"];
 export type ScreenshotRequest = components["schemas"]["ScreenshotRequest"];
 export type SelectRequest = components["schemas"]["SelectRequest"];
 export type ValidateDraftPlaywrightTestRequest = components["schemas"]["ValidateDraftPlaywrightTestRequest"];
